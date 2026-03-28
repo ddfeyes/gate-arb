@@ -217,6 +217,43 @@ impl ArbitragePosition {
     }
 }
 
+/// Command sent from hot/warm thread → OrderManager.
+#[derive(Debug, Clone)]
+pub enum OrderCmd {
+    Place {
+        /// Locally assigned monotonic ID (fits in Gate.io text field).
+        client_id: u64,
+        symbol: &'static str,
+        side: Side,
+        price: Fixed64,
+        qty: u64,        // in 1e8 units
+        post_only: bool, // ALWAYS true for this system
+    },
+    Cancel {
+        client_id: u64,
+        exchange_id: String,
+        symbol: &'static str,
+    },
+}
+
+/// Status of an order on the exchange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderStatus {
+    Open,
+    Filled,
+    PartiallyFilled,
+    Cancelled,
+    Rejected,
+}
+
+/// Acknowledgement/update sent from OrderManager → strategy/warm thread.
+#[derive(Debug, Clone)]
+pub struct OrderAck {
+    pub client_id: u64,
+    pub exchange_id: String,
+    pub status: OrderStatus,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

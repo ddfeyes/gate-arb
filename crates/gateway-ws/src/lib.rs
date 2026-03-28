@@ -183,34 +183,24 @@ impl GatewayWs {
     }
 
     /// Parse a price string to Fixed64 without allocating.
+    ///
+    /// Correctly separates integer and fractional parts so that
+    /// "50000.12345678" → `Fixed64::from_raw(5_000_012_345_678)`.
     #[inline(always)]
     pub fn parse_price(s: &str) -> Fixed64 {
-        // Use fixed-point parsing: string → u64 * 1e8
-        // Simple implementation: find decimal point and compute
-        let bytes = s.as_bytes();
-        let mut val: u64 = 0;
-        let mut frac_digits: u32 = 0;
+        const SCALE: u64 = 100_000_000; // 1e8
 
-        for &b in bytes {
-            if b == b'.' {
-                continue;
-            }
-            if b.is_ascii_digit() {
-                let d = (b - b'0') as u64;
-                val = val * 10 + d;
-                frac_digits += 1;
-            }
-        }
-
-        if frac_digits >= 8 {
-            // Enough or more decimals — shift right
-            let shift = frac_digits - 8;
-            Fixed64::from_raw(val / 10u64.pow(shift))
+        let dot_pos = s.find('.');
+        let int_part: u64 = s[..dot_pos.unwrap_or(s.len())].parse().unwrap_or(0);
+        let frac_raw: u64 = if let Some(d) = dot_pos {
+            let frac_str = &s[d + 1..];
+            let digits = frac_str.len().min(8);
+            let val: u64 = frac_str[..digits].parse().unwrap_or(0);
+            val * 10u64.pow((8 - digits) as u32)
         } else {
-            // Pad with zeros on the right
-            let mul = 10u64.pow(8 - frac_digits);
-            Fixed64::from_raw(val * mul)
-        }
+            0
+        };
+        Fixed64::from_raw(int_part * SCALE + frac_raw)
     }
 }
 

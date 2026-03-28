@@ -28,7 +28,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Build engine
     let engine = Arc::new(engine::Engine::<20, 20>::new());
-    let strategy = strategy::Strategy::new(Arc::clone(&engine), 50_000_000); // 50bps = 0.5%
+    // threshold_spread_raw is an ABSOLUTE spread in Fixed64 raw units (1e8 = 1 USDT).
+    // 50bps on BTC ~50k = $250 = 25_000_000_000 raw.
+    // In paper mode this is just a signal threshold — no real orders.
+    let strategy = strategy::Strategy::new(Arc::clone(&engine), 25_000_000_000);
 
     // Build frontend broadcaster
     let frontend = Arc::new(frontend_ws::FrontendWs::new());

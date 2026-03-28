@@ -89,8 +89,7 @@ impl OrderManager {
             .await?;
 
         let mut ring = OrderRing::<32>::new();
-        let mut ping_interval =
-            tokio::time::interval(tokio::time::Duration::from_secs(20));
+        let mut ping_interval = tokio::time::interval(tokio::time::Duration::from_secs(20));
 
         loop {
             tokio::select! {

@@ -13,7 +13,11 @@ mod tests {
             post_only: true,
         };
         match cmd {
-            OrderCmd::Place { client_id, post_only, .. } => {
+            OrderCmd::Place {
+                client_id,
+                post_only,
+                ..
+            } => {
                 assert_eq!(client_id, 42);
                 assert!(post_only);
             }

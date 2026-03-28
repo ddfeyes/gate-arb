@@ -26,8 +26,8 @@ pub fn build_auth_header(api_key: &str, api_secret: &str, ts: u64) -> AuthHeader
     // Gate.io sign string (channel and event are empty for login)
     let sign_string = format!("channel=\nevent=\nts={ts}");
 
-    let mut mac = HmacSha512::new_from_slice(api_secret.as_bytes())
-        .expect("HMAC accepts any key size");
+    let mut mac =
+        HmacSha512::new_from_slice(api_secret.as_bytes()).expect("HMAC accepts any key size");
     mac.update(sign_string.as_bytes());
     let result = mac.finalize().into_bytes();
     let signature = hex::encode(result);

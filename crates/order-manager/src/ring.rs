@@ -40,7 +40,10 @@ impl<const N: usize> OrderRing<N> {
     /// Find by client_id — O(N) scan, N is small (≤32).
     #[inline]
     pub fn find_by_client_id(&self, client_id: u64) -> Option<&InFlightOrder> {
-        self.slots.iter().flatten().find(|o| o.client_id == client_id)
+        self.slots
+            .iter()
+            .flatten()
+            .find(|o| o.client_id == client_id)
     }
 
     /// Update status + exchange_id when ack arrives.

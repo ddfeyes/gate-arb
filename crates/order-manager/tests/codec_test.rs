@@ -1,4 +1,6 @@
-use order_manager::codec::{decode_order_update, encode_cancel_order, encode_place_order, PlaceOrderParams};
+use order_manager::codec::{
+    decode_order_update, encode_cancel_order, encode_place_order, PlaceOrderParams,
+};
 use types::{Fixed64, OrderStatus, Side};
 
 #[test]

@@ -11,6 +11,7 @@ use engine::Engine;
 use types::{ArbitragePosition, Leg, LegKind, SpreadSignal, TradeState};
 
 const LEG2_TIMEOUT_US: u64 = 500_000; // 500ms
+#[allow(dead_code)]
 const MAX_DRAWDOWN_RAW: u64 = 10_000_000_000; // $100 in 1e8 units
 
 pub struct Strategy {

@@ -7,11 +7,10 @@ use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
-use types::{Fixed64, Level, OrderBook, Side, TradeState};
+use types::{Fixed64, Level};
 
 const GATE_WS_URL: &str = "wss://api.gateio.ws/ws/v4/";
 
@@ -196,7 +195,7 @@ impl GatewayWs {
             if b == b'.' {
                 continue;
             }
-            if (b'0'..=b'9').contains(&b) {
+            if b.is_ascii_digit() {
                 let d = (b - b'0') as u64;
                 val = val * 10 + d;
                 frac_digits += 1;

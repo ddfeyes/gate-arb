@@ -50,6 +50,7 @@ impl SubscribeMsg {
 
 /// Gate.io order book update message (parsed without heap).
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ObUpdate {
     t: u64,    // timestamp_us
     s: String, // currency pair symbol
@@ -73,6 +74,7 @@ enum WsEvent {
 
 /// Snapshot message for full book.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ObSnapshot {
     id: u64,
     t: u64,
@@ -196,7 +198,7 @@ impl GatewayWs {
                 in_frac = true;
                 continue;
             }
-            if b >= b'0' && b <= b'9' {
+            if (b'0'..=b'9').contains(&b) {
                 let d = (b - b'0') as u64;
                 val = val * 10 + d;
                 if in_frac {
@@ -206,7 +208,7 @@ impl GatewayWs {
         }
 
         // Scale to 1e8
-        let scale: u64 = 100_000_000;
+        let _scale: u64 = 100_000_000;
         if frac_digits >= 8 {
             // Enough or more decimals — just take first 8
             let div = 10u64.pow(frac_digits - 8);

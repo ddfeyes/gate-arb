@@ -10,7 +10,6 @@ pub mod auth;
 pub mod codec;
 pub mod ring;
 
-use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use ring::{InFlightOrder, OrderRing};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

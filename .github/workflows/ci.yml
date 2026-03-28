@@ -35,8 +35,12 @@ jobs:
 
       - name: Check binary size
         run: |
-          SIZE=$(stat -c%s target/release/gate-arb 2>/dev/null || stat -f%z target/release/gate-arb)
-          echo "Binary size: $SIZE bytes"
-          if [ "$SIZE" -gt 5000000 ]; then
-            echo "WARNING: binary > 5MB, consider Go fallback"
+          if [ -f target/release/gate-arb ]; then
+            SIZE=$(wc -c < target/release/gate-arb)
+            echo "Binary size: $SIZE bytes"
+            if [ "$SIZE" -gt 5000000 ]; then
+              echo "WARNING: binary > 5MB, consider Go fallback"
+            fi
+          else
+            echo "Binary not found, skip size check"
           fi

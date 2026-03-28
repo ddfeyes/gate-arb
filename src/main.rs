@@ -17,7 +17,7 @@ mod args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let subscriber = FmtSubscriber::builder()
+    let _subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .with_target(false)
         .compact()
@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
     // threshold_spread_raw is an ABSOLUTE spread in Fixed64 raw units (1e8 = 1 USDT).
     // 50bps on BTC ~50k = $250 = 25_000_000_000 raw.
     // In paper mode this is just a signal threshold — no real orders.
-    let strategy = strategy::Strategy::new(Arc::clone(&engine), 25_000_000_000);
+    let _strategy = strategy::Strategy::new(Arc::clone(&engine), 25_000_000_000);
 
     // Build frontend broadcaster
     let frontend = Arc::new(frontend_ws::FrontendWs::new());

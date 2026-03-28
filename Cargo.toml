@@ -2,6 +2,25 @@
 resolver = "2"
 members = ["crates/types", "crates/gateway-ws", "crates/engine", "crates/strategy", "crates/frontend-ws", "crates/order-manager"]
 
+[package]
+name = "gate-arb"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.44", features = ["full"] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+engine = { path = "crates/engine" }
+frontend-ws = { path = "crates/frontend-ws" }
+strategy = { path = "crates/strategy" }
+gateway-ws = { path = "crates/gateway-ws" }
+
+[[bin]]
+name = "gate-arb"
+path = "src/main.rs"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

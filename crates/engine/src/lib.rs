@@ -4,7 +4,8 @@
 
 use parking_lot::RwLock;
 use std::sync::Arc;
-use tracing::{debug, info};
+#[allow(unused_imports)]
+use tracing::info;
 
 use types::{Fixed64, OrderBook, SpreadSignal, SCALE};
 
@@ -30,8 +31,8 @@ impl<const B: usize, const A: usize> Engine<B, A> {
         let perp = self.perp_book.read();
 
         let best_bid = spot.best_bid()?;
-        let best_ask = spot.best_ask()?;
-        let perp_bid = perp.best_bid()?;
+        let _best_ask = spot.best_ask()?;
+        let _perp_bid = perp.best_bid()?;
         let perp_ask = perp.best_ask()?;
 
         // Cross-exchange spread: (perp_ask - spot_bid) / spot_bid

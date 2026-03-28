@@ -17,7 +17,7 @@ impl Fixed64 {
     }
 
     #[inline(always)]
-    pub const fn from_float(val: f64) -> Self {
+    pub fn from_float(val: f64) -> Self {
         Self((val * SCALE as f64) as u64)
     }
 

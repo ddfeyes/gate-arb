@@ -109,13 +109,25 @@ impl<const B: usize, const A: usize> OrderBook<B, A> {
     /// Best bid price (highest) — top of book.
     #[inline(always)]
     pub fn best_bid(&self) -> Option<Fixed64> {
-        self.bid_count.checked_sub(1).map(|i| self.bids[i].price)
+        if self.bid_count == 0 {
+            return None;
+        }
+        self.bids[..self.bid_count]
+            .iter()
+            .max_by_key(|l| l.price.raw())
+            .map(|l| l.price)
     }
 
     /// Best ask price (lowest) — top of book.
     #[inline(always)]
     pub fn best_ask(&self) -> Option<Fixed64> {
-        self.ask_count.checked_sub(1).map(|i| self.asks[i].price)
+        if self.ask_count == 0 {
+            return None;
+        }
+        self.asks[..self.ask_count]
+            .iter()
+            .min_by_key(|l| l.price.raw())
+            .map(|l| l.price)
     }
 
     /// Spread = ask - bid in raw units.

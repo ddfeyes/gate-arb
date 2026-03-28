@@ -65,7 +65,7 @@ impl FrontendWs {
     }
 
     /// Start WS server on given port, broadcast state to all connections.
-    pub async fn run(&self, port: u16) -> anyhow::Result<()> {
+    pub async fn run(self: Arc<Self>, port: u16) -> anyhow::Result<()> {
         let addr = format!("0.0.0.0:{}", port);
         let listener = TcpListener::bind(&addr).await?;
         info!("Frontend WS listening on ws://{}", addr);
@@ -74,8 +74,9 @@ impl FrontendWs {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     let state = Arc::clone(&self.state);
+                    let this = Arc::clone(&self);
                     tokio::spawn(async move {
-                        if let Err(e) = self.handle_client(state, stream).await {
+                        if let Err(e) = this.handle_client(state, stream).await {
                             error!("Client error {}: {:?}", addr, e);
                         }
                     });

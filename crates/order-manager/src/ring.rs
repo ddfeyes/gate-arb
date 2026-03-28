@@ -3,6 +3,7 @@
 //! Capacity N is compile-time constant: no heap growth, O(N) scan — N is small (≤32).
 //! Oldest entry is overwritten when the ring is full.
 
+use tracing::warn;
 use types::{Fixed64, OrderStatus, Side};
 
 #[derive(Debug, Clone)]
@@ -23,17 +24,25 @@ pub struct OrderRing<const N: usize> {
 
 impl<const N: usize> OrderRing<N> {
     pub fn new() -> Self {
-        // SAFETY: Option<InFlightOrder> is not Copy but we use a const fn workaround
-        // via array init with None values one by one via a macro trick.
-        // Since N is small and known at compile time this is fine.
         let slots = std::array::from_fn(|_| None);
         Self { slots, head: 0 }
     }
 
-    /// Insert a new in-flight order. Overwrites oldest if full.
+    /// Insert a new in-flight order.
+    ///
+    /// If the ring is at capacity, the oldest slot is overwritten. This is a
+    /// safety fallback — it should never happen in normal operation (max 32
+    /// concurrent orders). A warn! is emitted to surface this condition.
     #[inline]
     pub fn insert(&mut self, order: InFlightOrder) {
-        self.slots[self.head % N] = Some(order);
+        let slot = &mut self.slots[self.head % N];
+        if let Some(evicted) = slot {
+            warn!(
+                "OrderRing at capacity (N={}): evicting in-flight order client_id={}",
+                N, evicted.client_id
+            );
+        }
+        *slot = Some(order);
         self.head = self.head.wrapping_add(1);
     }
 

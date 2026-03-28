@@ -134,10 +134,11 @@ pub fn encode_cancel_order(
 
 #[derive(Debug, Deserialize)]
 struct WsOrderEvent {
-    #[allow(dead_code)]
-    channel: String,
-    #[allow(dead_code)]
-    event: String,
+    // channel and event parsed for future routing (e.g. multi-channel sessions).
+    #[serde(rename = "channel")]
+    _channel: String,
+    #[serde(rename = "event")]
+    _event: String,
     result: Vec<OrderResult>,
 }
 

@@ -2,6 +2,9 @@
 //!
 //! Post-only maker orders only. Auth via HMAC-SHA512.
 //! Thread-safe: orders sent via mpsc channel from hot path.
+//!
+//! Reconnect: on WS error or disconnect, run() retries with exponential backoff
+//! (1s → 2s → 4s … capped at 60s). The cmd channel is preserved across reconnects.
 
 pub mod auth;
 pub mod codec;
@@ -10,7 +13,7 @@ pub mod ring;
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use ring::{InFlightOrder, OrderRing};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
@@ -37,24 +40,58 @@ impl OrderManager {
     }
 
     /// Returns (cmd_tx, ack_rx) and spawns the WS manager task.
+    ///
+    /// The spawned task reconnects automatically on disconnect with exponential
+    /// backoff. cmd_tx remains valid across reconnects.
     pub fn start(self) -> (OrderSender, AckReceiver) {
         let (cmd_tx, cmd_rx) = mpsc::channel::<OrderCmd>(64);
         let (ack_tx, ack_rx) = mpsc::channel::<OrderAck>(64);
         tokio::spawn(async move {
-            if let Err(e) = self.run(cmd_rx, ack_tx).await {
-                error!("OrderManager fatal: {:?}", e);
-            }
+            self.run(cmd_rx, ack_tx).await;
         });
         (cmd_tx, ack_rx)
     }
 
-    async fn run(
-        self,
-        mut cmd_rx: mpsc::Receiver<OrderCmd>,
-        ack_tx: mpsc::Sender<OrderAck>,
-    ) -> Result<()> {
+    /// Outer reconnect loop. Retries session() on any error/disconnect.
+    /// Backoff: 1s → 2s → 4s … max 60s.
+    async fn run(self, mut cmd_rx: mpsc::Receiver<OrderCmd>, ack_tx: mpsc::Sender<OrderAck>) {
+        let mut backoff = Duration::from_secs(1);
+        let max_backoff = Duration::from_secs(60);
+
+        loop {
+            match self.session(&mut cmd_rx, &ack_tx).await {
+                SessionExit::CmdChannelClosed => {
+                    info!("OrderManager: cmd channel closed, shutting down");
+                    return;
+                }
+                SessionExit::WsError(e) => {
+                    error!(
+                        "OrderManager WS error: {:?} — reconnecting in {:?}",
+                        e, backoff
+                    );
+                }
+                SessionExit::WsClosed => {
+                    warn!("OrderManager WS closed — reconnecting in {:?}", backoff);
+                }
+            }
+
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(max_backoff);
+        }
+    }
+
+    /// Inner WS session: connect → auth → subscribe → event loop.
+    /// Returns the reason the session ended.
+    async fn session(
+        &self,
+        cmd_rx: &mut mpsc::Receiver<OrderCmd>,
+        ack_tx: &mpsc::Sender<OrderAck>,
+    ) -> SessionExit {
         info!("OrderManager connecting to {}", self.ws_url);
-        let (ws, _) = connect_async(self.ws_url).await?;
+        let ws = match connect_async(self.ws_url).await {
+            Ok((ws, _)) => ws,
+            Err(e) => return SessionExit::WsError(format!("connect failed: {:?}", e)),
+        };
         let (mut write, mut read) = ws.split();
 
         // Authenticate
@@ -72,9 +109,12 @@ impl OrderManager {
                 "Timestamp": auth_header.timestamp.to_string()
             }
         });
-        write
+        if let Err(e) = write
             .send(Message::Text(login_msg.to_string().into()))
-            .await?;
+            .await
+        {
+            return SessionExit::WsError(format!("login send failed: {:?}", e));
+        }
         info!("OrderManager: login sent");
 
         // Subscribe to spot.orders channel
@@ -84,30 +124,28 @@ impl OrderManager {
             "event": "subscribe",
             "payload": ["BTC_USDT"]
         });
-        write
-            .send(Message::Text(sub_msg.to_string().into()))
-            .await?;
+        if let Err(e) = write.send(Message::Text(sub_msg.to_string().into())).await {
+            return SessionExit::WsError(format!("subscribe send failed: {:?}", e));
+        }
 
         let mut ring = OrderRing::<32>::new();
-        let mut ping_interval = tokio::time::interval(tokio::time::Duration::from_secs(20));
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
 
         loop {
             tokio::select! {
                 msg = read.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
-                            self.handle_inbound(text.as_str(), &mut ring, &ack_tx).await;
+                            self.handle_inbound(text.as_str(), &mut ring, ack_tx).await;
                         }
                         Some(Ok(Message::Ping(data))) => {
                             let _ = write.send(Message::Pong(data)).await;
                         }
                         Some(Err(e)) => {
-                            error!("OrderManager WS error: {:?}", e);
-                            break;
+                            return SessionExit::WsError(format!("{:?}", e));
                         }
                         None => {
-                            warn!("OrderManager WS closed");
-                            break;
+                            return SessionExit::WsClosed;
                         }
                         _ => {}
                     }
@@ -119,8 +157,7 @@ impl OrderManager {
                             self.handle_cmd(cmd, &mut write, &mut ring).await;
                         }
                         None => {
-                            info!("OrderManager: cmd channel closed, exiting");
-                            break;
+                            return SessionExit::CmdChannelClosed;
                         }
                     }
                 }
@@ -135,8 +172,6 @@ impl OrderManager {
                 }
             }
         }
-
-        Ok(())
     }
 
     async fn handle_inbound(
@@ -150,7 +185,11 @@ impl OrderManager {
             if matches!(ack.status, OrderStatus::Filled | OrderStatus::Cancelled) {
                 ring.remove(ack.client_id);
             }
-            let _ = ack_tx.try_send(ack);
+            // Use blocking send: fill acks must not be dropped.
+            // The warm thread must drain the ack channel promptly (cap 64).
+            if let Err(e) = ack_tx.send(ack).await {
+                error!("OrderManager: ack channel closed, fill lost: {:?}", e);
+            }
         }
     }
 
@@ -171,7 +210,7 @@ impl OrderManager {
             } => {
                 let ts = unix_secs();
                 let sign_str = format!("channel=spot.orders\nevent=api\nts={ts}");
-                let sig = hmac_sign(&self.api_secret, &sign_str);
+                let sig = auth::hmac_sign(&self.api_secret, &sign_str);
 
                 let json = codec::encode_place_order(codec::PlaceOrderParams {
                     channel: "spot.orders",
@@ -207,7 +246,7 @@ impl OrderManager {
             } => {
                 let ts = unix_secs();
                 let sign_str = format!("channel=spot.orders\nevent=cancel\nts={ts}");
-                let sig = hmac_sign(&self.api_secret, &sign_str);
+                let sig = auth::hmac_sign(&self.api_secret, &sign_str);
 
                 let json = codec::encode_cancel_order(
                     "spot.orders",
@@ -226,19 +265,19 @@ impl OrderManager {
     }
 }
 
+/// Reason a WS session ended.
+enum SessionExit {
+    /// cmd channel dropped — orderly shutdown.
+    CmdChannelClosed,
+    /// WS protocol error.
+    WsError(String),
+    /// Remote closed connection cleanly.
+    WsClosed,
+}
+
 fn unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
-}
-
-fn hmac_sign(secret: &str, message: &str) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha512;
-    type HmacSha512 = Hmac<Sha512>;
-
-    let mut mac = HmacSha512::new_from_slice(secret.as_bytes()).expect("hmac key");
-    mac.update(message.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
 }

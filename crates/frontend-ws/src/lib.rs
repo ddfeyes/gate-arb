@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 const MAX_LOG_ENTRIES: usize = 100;
 

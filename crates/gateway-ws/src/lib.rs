@@ -69,6 +69,7 @@ enum WsEvent {
     #[serde(rename = "futures.order_book")]
     FuturesOb(ObUpdate),
     #[serde(rename = "spot.trades")]
+    #[allow(dead_code)]
     SpotTrades(ObUpdate),
 }
 
@@ -189,32 +190,25 @@ impl GatewayWs {
         // Simple implementation: find decimal point and compute
         let bytes = s.as_bytes();
         let mut val: u64 = 0;
-        let mut frac: u64 = 0;
-        let mut in_frac = false;
-        let mut frac_digits = 0;
+        let mut frac_digits: u32 = 0;
 
         for &b in bytes {
             if b == b'.' {
-                in_frac = true;
                 continue;
             }
             if (b'0'..=b'9').contains(&b) {
                 let d = (b - b'0') as u64;
                 val = val * 10 + d;
-                if in_frac {
-                    frac_digits += 1;
-                }
+                frac_digits += 1;
             }
         }
 
-        // Scale to 1e8
-        let _scale: u64 = 100_000_000;
         if frac_digits >= 8 {
-            // Enough or more decimals — just take first 8
-            let div = 10u64.pow(frac_digits - 8);
-            Fixed64::from_raw(val / div)
+            // Enough or more decimals — shift right
+            let shift = frac_digits - 8;
+            Fixed64::from_raw(val / 10u64.pow(shift))
         } else {
-            // Pad with zeros
+            // Pad with zeros on the right
             let mul = 10u64.pow(8 - frac_digits);
             Fixed64::from_raw(val * mul)
         }

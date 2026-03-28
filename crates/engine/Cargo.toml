@@ -1,0 +1,11 @@
+[package]
+name = "engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+types = { path = "../types" }
+gateway-ws = { path = "../gateway-ws" }
+parking_lot = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/types", "crates/gateway-ws", "crates/engine", "crates/strategy", "crates/frontend-ws"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Ivan <ivan@ddfeyes.com>"]
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1.44", features = ["full"] }
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+thiserror = "2.0"
+parking_lot = "0.12"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

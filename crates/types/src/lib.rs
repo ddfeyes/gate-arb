@@ -79,8 +79,14 @@ impl<const B: usize, const A: usize> OrderBook<B, A> {
     #[inline(always)]
     pub fn new() -> Self {
         Self {
-            bids: [Level { price: Fixed64::zero(), qty: 0 }; B],
-            asks: [Level { price: Fixed64::zero(), qty: 0 }; A],
+            bids: [Level {
+                price: Fixed64::zero(),
+                qty: 0,
+            }; B],
+            asks: [Level {
+                price: Fixed64::zero(),
+                qty: 0,
+            }; A],
             bid_count: 0,
             ask_count: 0,
         }
@@ -221,19 +227,34 @@ mod tests {
     fn test_order_book_update() {
         let mut book: OrderBook<10, 10> = OrderBook::new();
         let bids = [
-            Level { price: Fixed64::from_float(50000.0), qty: 1000 },
-            Level { price: Fixed64::from_float(49999.0), qty: 2000 },
+            Level {
+                price: Fixed64::from_float(50000.0),
+                qty: 1000,
+            },
+            Level {
+                price: Fixed64::from_float(49999.0),
+                qty: 2000,
+            },
         ];
         book.update_bids(&bids);
         assert_eq!(book.bid_count, 2);
-        assert_eq!(book.best_bid().unwrap().raw(), Fixed64::from_float(50000.0).raw());
+        assert_eq!(
+            book.best_bid().unwrap().raw(),
+            Fixed64::from_float(50000.0).raw()
+        );
     }
 
     #[test]
     fn test_spread_raw() {
         let mut book: OrderBook<10, 10> = OrderBook::new();
-        book.update_bids(&[Level { price: Fixed64::from_float(50000.0), qty: 1000 }]);
-        book.update_asks(&[Level { price: Fixed64::from_float(50001.0), qty: 1000 }]);
+        book.update_bids(&[Level {
+            price: Fixed64::from_float(50000.0),
+            qty: 1000,
+        }]);
+        book.update_asks(&[Level {
+            price: Fixed64::from_float(50001.0),
+            qty: 1000,
+        }]);
         let spread = book.spread_raw().unwrap();
         let expected = Fixed64::from_float(1.0).raw();
         assert_eq!(spread, expected);

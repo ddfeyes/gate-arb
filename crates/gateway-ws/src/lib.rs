@@ -51,10 +51,10 @@ impl SubscribeMsg {
 /// Gate.io order book update message (parsed without heap).
 #[derive(Debug, Deserialize)]
 struct ObUpdate {
-    t: u64,        // timestamp_us
-    s: String,     // currency pair symbol
+    t: u64,    // timestamp_us
+    s: String, // currency pair symbol
     #[serde(rename = "b")]
-    bids: Vec<(String, String)>,   // price, qty — string to avoid float
+    bids: Vec<(String, String)>, // price, qty — string to avoid float
     #[serde(rename = "a")]
     asks: Vec<(String, String)>,
 }
@@ -90,7 +90,9 @@ pub struct GatewayWs {
 
 impl GatewayWs {
     pub fn new() -> Self {
-        Self { ws_url: GATE_WS_URL }
+        Self {
+            ws_url: GATE_WS_URL,
+        }
     }
 
     /// Connect and run the WebSocket session.

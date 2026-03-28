@@ -24,7 +24,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     info!("gate-arb starting...");
-    info!("Paper mode: {}", std::env::var("PAPER_MODE").unwrap_or_else(|_| "true".into()));
+    info!(
+        "Paper mode: {}",
+        std::env::var("PAPER_MODE").unwrap_or_else(|_| "true".into())
+    );
 
     // Build engine
     let engine = Arc::new(engine::Engine::<20, 20>::new());

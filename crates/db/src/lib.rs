@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeRecord {
     pub symbol: String,
-    pub entry_ts: i64,   // unix micros
+    pub entry_ts: i64, // unix micros
     pub exit_ts: i64,
     pub spot_entry: i64, // raw fixed-point (1e8)
     pub perp_entry: i64,
@@ -24,7 +24,7 @@ pub struct TradeRecord {
     pub perp_exit: i64,
     pub size_usd: i64,
     pub pnl_usd: i64,
-    pub pnl_pct: i64,     // basis points * 100 (i.e. 10000 = 100%)
+    pub pnl_pct: i64, // basis points * 100 (i.e. 10000 = 100%)
     pub exit_reason: String,
 }
 
@@ -32,7 +32,7 @@ pub struct TradeRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpreadRecord {
     pub ts: i64,
-    pub spread_bps: i64,  // basis points * 100
+    pub spread_bps: i64, // basis points * 100
     pub bid_price: i64,
     pub ask_price: i64,
 }
@@ -158,21 +158,23 @@ impl DbWriter {
                                 size_usd,pnl_usd,pnl_pct,exit_reason
                          FROM trades ORDER BY id DESC LIMIT ?1"
                     ).expect("prepare trades query");
-                    let trades = stmt.query_map([n], |row| {
-                        Ok(TradeRecord {
-                            symbol: row.get(0)?,
-                            entry_ts: row.get(1)?,
-                            exit_ts: row.get(2)?,
-                            spot_entry: row.get(3)?,
-                            perp_entry: row.get(4)?,
-                            spot_exit: row.get(5)?,
-                            perp_exit: row.get(6)?,
-                            size_usd: row.get(7)?,
-                            pnl_usd: row.get(8)?,
-                            pnl_pct: row.get(9)?,
-                            exit_reason: row.get(10)?,
+                    let trades = stmt
+                        .query_map([n], |row| {
+                            Ok(TradeRecord {
+                                symbol: row.get(0)?,
+                                entry_ts: row.get(1)?,
+                                exit_ts: row.get(2)?,
+                                spot_entry: row.get(3)?,
+                                perp_entry: row.get(4)?,
+                                spot_exit: row.get(5)?,
+                                perp_exit: row.get(6)?,
+                                size_usd: row.get(7)?,
+                                pnl_usd: row.get(8)?,
+                                pnl_pct: row.get(9)?,
+                                exit_reason: row.get(10)?,
+                            })
                         })
-                    }).expect("query map");
+                        .expect("query map");
                     let result: Vec<_> = trades.filter_map(|t| t.ok()).collect();
                     let _ = resp.send(result);
                 }
@@ -182,10 +184,14 @@ impl DbWriter {
                         .query_row("SELECT COUNT(*) FROM trades", [], |r| r.get(0))
                         .unwrap_or(0);
                     let wins: i64 = conn
-                        .query_row("SELECT COUNT(*) FROM trades WHERE pnl_usd > 0", [], |r| r.get(0))
+                        .query_row("SELECT COUNT(*) FROM trades WHERE pnl_usd > 0", [], |r| {
+                            r.get(0)
+                        })
                         .unwrap_or(0);
                     let total_pnl: i64 = conn
-                        .query_row("SELECT COALESCE(SUM(pnl_usd),0) FROM trades", [], |r| r.get(0))
+                        .query_row("SELECT COALESCE(SUM(pnl_usd),0) FROM trades", [], |r| {
+                            r.get(0)
+                        })
                         .unwrap_or(0);
                     let avg_dur: f64 = conn
                         .query_row(
@@ -194,7 +200,11 @@ impl DbWriter {
                             |r| r.get(0),
                         )
                         .unwrap_or(0.0);
-                    let win_rate = if total > 0 { wins as f64 / total as f64 } else { 0.0 };
+                    let win_rate = if total > 0 {
+                        wins as f64 / total as f64
+                    } else {
+                        0.0
+                    };
                     let _ = resp.send(PnlSummary {
                         total_trades: total,
                         win_rate,
@@ -264,10 +274,7 @@ pub async fn start_http_server(port: u16, db: DbWriter) -> Result<()> {
     }
 }
 
-async fn handle_http(
-    mut stream: tokio::net::TcpStream,
-    db: DbWriter,
-) -> Result<()> {
+async fn handle_http(mut stream: tokio::net::TcpStream, db: DbWriter) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut buf = [0u8; 2048];

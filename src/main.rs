@@ -19,6 +19,7 @@ use tracing_subscriber::FmtSubscriber;
 use engine::Engine;
 use frontend_ws::FrontendWs;
 use gateway_ws::{parse_price as gw_parse_price, ReconnectConfig, WsEvent, CHANNEL_FUNDING_RATE};
+use risk::RiskManager;
 use strategy::{FundingStrategy, Strategy};
 use types::{Level as ObLevel, OrderBook};
 
@@ -145,6 +146,7 @@ async fn run_gateway_once(
     spot_symbol: &str,
     perp_symbol: &str,
     hot_path: Arc<HotPath>,
+    risk: Arc<RiskManager>,
 ) -> Result<()> {
     use tokio_tungstenite::connect_async;
 
@@ -184,10 +186,12 @@ async fn run_gateway_once(
     debug!("Subscribed to futures.funding_rate");
 
     let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
+    let mut last_ping_sent: Option<Instant> = None;
 
     loop {
         tokio::select! {
             _ = ping_interval.tick() => {
+                last_ping_sent = Some(Instant::now());
                 write.send(Message::Ping(vec![].into())).await?;
                 debug!("Sent ping");
             }
@@ -195,6 +199,14 @@ async fn run_gateway_once(
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         hot_path.process_text(&text);
+                    }
+                    Some(Ok(Message::Pong(_))) => {
+                        // Measure round-trip and report to risk manager
+                        if let Some(sent) = last_ping_sent.take() {
+                            let rtt_ms = sent.elapsed().as_millis() as u64;
+                            risk.update_ping_latency(rtt_ms);
+                            debug!("Pong RTT: {}ms", rtt_ms);
+                        }
                     }
                     Some(Ok(Message::Ping(data))) => {
                         write.send(Message::Pong(data)).await?;
@@ -229,6 +241,7 @@ async fn run_gateway_with_reconnect(
     perp_symbol: &str,
     hot_path: Arc<HotPath>,
     health: Arc<health::HealthHandle>,
+    risk: Arc<RiskManager>,
     cfg: ReconnectConfig,
 ) -> Result<()> {
     // consecutive_failures counts uninterrupted failures (reset on clean connect).
@@ -261,7 +274,14 @@ async fn run_gateway_with_reconnect(
             tokio::time::sleep(delay).await;
         }
 
-        match run_gateway_once(spot_symbol, perp_symbol, Arc::clone(&hot_path)).await {
+        match run_gateway_once(
+            spot_symbol,
+            perp_symbol,
+            Arc::clone(&hot_path),
+            Arc::clone(&risk),
+        )
+        .await
+        {
             Ok(()) => {
                 // Clean close — not a failure. Reset consecutive failure counter and
                 // outage timer so the 10-strikes limit counts consecutive bad reconnects,
@@ -353,11 +373,24 @@ async fn main() -> anyhow::Result<()> {
     let engine = Arc::new(engine::Engine::<20, 20>::new());
     health.set_engine(health::EngineStatus::Idle).await;
 
-    // Spread arb strategy — threshold from config
-    let strategy = Arc::new(strategy::Strategy::new(
-        Arc::clone(&engine),
-        cfg.spread_threshold_raw,
-    ));
+    // Risk manager — drawdown limits, position cap, kill switch, latency gate
+    let risk_cfg = risk::RiskConfig::from_env();
+    let risk_manager = Arc::new(risk::RiskManager::new(risk_cfg));
+    risk_manager.set_paper_mode(cfg.paper_mode);
+    info!(
+        "Risk manager: paper_mode={} max_drawdown_raw={} max_positions={} ping_threshold={}ms",
+        cfg.paper_mode,
+        risk_manager.status().max_drawdown_raw,
+        risk_manager.status().max_positions,
+        risk_manager.status().ping_threshold_ms,
+    );
+
+    // Spread arb strategy — threshold from config, risk manager attached
+    let strategy = {
+        let mut s = strategy::Strategy::new(Arc::clone(&engine), cfg.spread_threshold_raw);
+        s.set_risk(Arc::clone(&risk_manager));
+        Arc::new(s)
+    };
 
     // Funding arb strategy
     let funding_strategy = Arc::new(FundingStrategy::new(cfg.paper_mode));
@@ -423,6 +456,7 @@ async fn main() -> anyhow::Result<()> {
         &cfg.perp_symbol,
         hot_path,
         Arc::clone(&health),
+        Arc::clone(&risk_manager),
         ReconnectConfig::default(),
     )
     .await;

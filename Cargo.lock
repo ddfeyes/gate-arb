@@ -185,6 +185,7 @@ dependencies = [
  "gateway-ws",
  "health",
  "parking_lot",
+ "risk",
  "serde",
  "serde_json",
  "strategy",
@@ -508,6 +509,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "risk"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "rustls"
 version = "0.23.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -664,6 +675,7 @@ version = "0.1.0"
 dependencies = [
  "engine",
  "parking_lot",
+ "risk",
  "tracing",
  "types",
 ]

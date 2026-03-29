@@ -15,6 +15,7 @@ pub use funding::FundingStrategy;
 
 use engine::Engine;
 use parking_lot::RwLock;
+use risk::RiskManager;
 use std::sync::Arc;
 use tracing::{info, warn};
 use types::{ArbitragePosition, Leg, LegKind, SpreadSignal, TradeState, SCALE};
@@ -51,6 +52,8 @@ pub struct Strategy {
     paper_stats: RwLock<PaperStats>,
     /// Tick counter for summary printing.
     tick_counter: RwLock<u64>,
+    /// Optional risk manager — checked before every entry.
+    risk: Option<Arc<RiskManager>>,
 }
 
 impl Strategy {
@@ -68,7 +71,13 @@ impl Strategy {
             cumulative_pnl: RwLock::new(0),
             paper_stats: RwLock::new(PaperStats::default()),
             tick_counter: RwLock::new(0),
+            risk: None,
         }
+    }
+
+    /// Attach a risk manager. Call before starting the tick loop.
+    pub fn set_risk(&mut self, risk: Arc<RiskManager>) {
+        self.risk = Some(risk);
     }
 
     /// Called every tick from the hot path — check spread, emit signals.
@@ -89,14 +98,28 @@ impl Strategy {
             }
 
             if self.position.read().is_none() {
-                info!(
-                    "SPREAD SIGNAL: raw={} pct={} bid={} ask={}",
-                    sig.spread_raw, sig.spread_pct, sig.bid_price, sig.ask_price
-                );
-                if self.paper_mode {
-                    self.paper_open_position(sig.clone());
+                // Risk gate: check before opening any position
+                let risk_ok = self
+                    .risk
+                    .as_ref()
+                    .map(|r| r.can_open_position())
+                    .unwrap_or(true);
+
+                if risk_ok {
+                    info!(
+                        "SPREAD SIGNAL: raw={} pct={} bid={} ask={}",
+                        sig.spread_raw, sig.spread_pct, sig.bid_price, sig.ask_price
+                    );
+                    if self.paper_mode {
+                        self.paper_open_position(sig.clone());
+                    } else {
+                        self.open_position(sig.clone());
+                    }
                 } else {
-                    self.open_position(sig.clone());
+                    warn!(
+                        "SPREAD SIGNAL skipped — risk gate blocked (raw={} pct={})",
+                        sig.spread_raw, sig.spread_pct
+                    );
                 }
             }
         }
@@ -144,6 +167,10 @@ impl Strategy {
         let mut pos = ArbitragePosition::new(leg1, leg2, now);
         pos.state = TradeState::BothFilled;
         *self.position.write() = Some(pos);
+
+        if let Some(ref risk) = self.risk {
+            risk.position_opened();
+        }
 
         info!(
             "PAPER OPEN: spot_buy@{} perp_short@{} spread_raw={} spread_pct={}",
@@ -240,6 +267,11 @@ impl Strategy {
             *cum_pnl
         };
 
+        // Sync risk manager with realised P&L (peak tracking, drawdown gate)
+        if let Some(ref risk) = self.risk {
+            risk.update_pnl(trade_pnl_raw);
+        }
+
         {
             let mut stats = self.paper_stats.write();
             stats.total_trades += 1;
@@ -264,6 +296,10 @@ impl Strategy {
 
         pos.state = TradeState::Closed;
         *pos_guard = None;
+
+        if let Some(ref risk) = self.risk {
+            risk.position_closed();
+        }
     }
 
     fn open_position(&self, sig: SpreadSignal) {
@@ -290,6 +326,10 @@ impl Strategy {
         };
 
         *self.position.write() = Some(ArbitragePosition::new(leg1, leg2, now));
+
+        if let Some(ref risk) = self.risk {
+            risk.position_opened();
+        }
     }
 
     fn check_timeouts(&self) {

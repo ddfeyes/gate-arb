@@ -83,9 +83,10 @@ impl Strategy {
     #[inline(always)]
     pub fn on_tick_with_signal(&self, sig: Option<SpreadSignal>) {
         if let Some(ref sig) = sig {
-            let mut stats = self.paper_stats.write();
-            stats.last_signal_at_us = Some(sig.timestamp_us);
-            drop(stats);
+            {
+                let mut stats = self.paper_stats.write();
+                stats.last_signal_at_us = Some(sig.timestamp_us);
+            }
 
             if self.position.read().is_none() {
                 info!(
@@ -195,7 +196,7 @@ impl Strategy {
 
         // Exit prices: use current book if available, else entry prices (conservative)
         let (spot_exit_price, perp_exit_price) = match snap.as_ref() {
-            Some(s) => (s.spot_bid.raw(), s.perp_ask.raw()),
+            Some(s) => (s.leg_a.raw(), s.leg_b.raw()),
             None => (spot_buy_price, perp_short_price),
         };
 
@@ -203,10 +204,13 @@ impl Strategy {
         let spot_pnl = (spot_exit_price as i64 - spot_buy_price as i64) * (qty as i64);
         let perp_pnl = (perp_short_price as i64 - perp_exit_price as i64) * (qty as i64);
 
-        // Fee: 2 legs open + 2 legs close × MAKER_FEE_BPS
+        // Fee: 4 legs × MAKER_FEE_BPS each
+        //   open:  spot buy + perp short
+        //   close: spot sell + perp buy-back
+        // notional ≈ (spot_entry + perp_entry) * qty (symmetric, close prices differ by ≤ spread)
         let notional = (spot_buy_price as i128 + perp_short_price as i128) * (qty as i128);
         let fee_raw =
-            ((notional * (MAKER_FEE_BPS * 2) as i128 / 10_000i128) / (SCALE as i128)) as i64;
+            ((notional * (MAKER_FEE_BPS * 4) as i128 / 10_000i128) / (SCALE as i128)) as i64;
 
         let trade_pnl_raw = (spot_pnl + perp_pnl) / (SCALE as i64) - fee_raw;
 
@@ -230,20 +234,22 @@ impl Strategy {
         };
 
         // Commit close
-        let mut cum_pnl = self.cumulative_pnl.write();
-        *cum_pnl += trade_pnl_raw;
-        let pnl_after = *cum_pnl;
-        drop(cum_pnl);
+        let pnl_after = {
+            let mut cum_pnl = self.cumulative_pnl.write();
+            *cum_pnl += trade_pnl_raw;
+            *cum_pnl
+        };
 
-        let mut stats = self.paper_stats.write();
-        stats.total_trades += 1;
-        if trade_pnl_raw >= 0 {
-            stats.wins += 1;
-        } else {
-            stats.losses += 1;
+        {
+            let mut stats = self.paper_stats.write();
+            stats.total_trades += 1;
+            if trade_pnl_raw >= 0 {
+                stats.wins += 1;
+            } else {
+                stats.losses += 1;
+            }
+            stats.pnl_raw = pnl_after;
         }
-        stats.pnl_raw = pnl_after;
-        drop(stats);
 
         info!(
             "PAPER CLOSE [{}]: spot_pnl={:.6} perp_pnl={:.6} fee={:.6} trade_pnl={:.6} cum_pnl={:.6} hold={}s",

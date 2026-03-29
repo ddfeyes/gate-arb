@@ -9,17 +9,34 @@ use tracing::info;
 
 use types::{Fixed64, OrderBook, SpreadSignal, SCALE};
 
+/// Direction tag for SpreadSnapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpreadDirection {
+    /// Normal arb: short perp / buy spot. leg_a = spot_bid, leg_b = perp_ask.
+    Normal,
+    /// Inverse arb: buy perp / short spot. leg_a = spot_ask, leg_b = perp_bid.
+    Inverse,
+}
+
 /// Current spread snapshot — returned regardless of threshold.
+///
+/// Field semantics depend on `direction`:
+/// - `Normal`:  `leg_a` = spot best bid, `leg_b` = perp best ask.
+///              spread_raw = perp_ask − spot_bid.
+/// - `Inverse`: `leg_a` = spot best ask, `leg_b` = perp best bid.
+///              spread_raw = spot_ask − perp_bid.
 #[derive(Debug, Clone, Copy)]
 pub struct SpreadSnapshot {
-    /// Spread in raw Fixed64 units. Saturating at 0 (negative = inverted).
+    /// Spread in raw Fixed64 units. Saturated to 0 when inverted.
     pub spread_raw: u64,
-    /// True if the spread is inverted (spot > perp — exit territory).
+    /// True when the spread has crossed zero into negative territory (exit signal).
     pub inverted: bool,
-    /// Spot best bid at snapshot time.
-    pub spot_bid: Fixed64,
-    /// Perp best ask at snapshot time.
-    pub perp_ask: Fixed64,
+    /// Direction: Normal (short perp / buy spot) or Inverse (buy perp / short spot).
+    pub direction: SpreadDirection,
+    /// leg_a price (spot_bid for Normal, spot_ask for Inverse).
+    pub leg_a: Fixed64,
+    /// leg_b price (perp_ask for Normal, perp_bid for Inverse).
+    pub leg_b: Fixed64,
 }
 
 /// Hot engine state — lock-free read path.
@@ -59,8 +76,9 @@ impl<const B: usize, const A: usize> Engine<B, A> {
         Some(SpreadSnapshot {
             spread_raw,
             inverted,
-            spot_bid,
-            perp_ask,
+            direction: SpreadDirection::Normal,
+            leg_a: spot_bid,
+            leg_b: perp_ask,
         })
     }
 
@@ -68,6 +86,7 @@ impl<const B: usize, const A: usize> Engine<B, A> {
     ///
     /// Positive when spot is trading above perp (buy perp, short spot).
     /// Used for monitoring and future inverse arb strategy.
+    /// leg_a = spot_ask, leg_b = perp_bid.
     #[inline(always)]
     pub fn current_spread_inverse(&self) -> Option<SpreadSnapshot> {
         let spot = self.spot_book.read();
@@ -86,9 +105,9 @@ impl<const B: usize, const A: usize> Engine<B, A> {
         Some(SpreadSnapshot {
             spread_raw,
             inverted,
-            // Reuse fields: bid_price = spot_ask, ask_price = perp_bid (inverse dir)
-            spot_bid: spot_ask,
-            perp_ask: perp_bid,
+            direction: SpreadDirection::Inverse,
+            leg_a: spot_ask,
+            leg_b: perp_bid,
         })
     }
 
@@ -103,8 +122,8 @@ impl<const B: usize, const A: usize> Engine<B, A> {
             return None;
         }
 
-        let spread_pct_raw = if snap.spot_bid.raw() > 0 {
-            (snap.spread_raw as u128 * SCALE as u128 / snap.spot_bid.raw() as u128) as u64
+        let spread_pct_raw = if snap.leg_a.raw() > 0 {
+            (snap.spread_raw as u128 * SCALE as u128 / snap.leg_a.raw() as u128) as u64
         } else {
             return None;
         };
@@ -117,8 +136,8 @@ impl<const B: usize, const A: usize> Engine<B, A> {
         Some(SpreadSignal {
             spread_raw: snap.spread_raw,
             spread_pct: Fixed64::from_raw(spread_pct_raw),
-            bid_price: snap.spot_bid,
-            ask_price: snap.perp_ask,
+            bid_price: snap.leg_a,
+            ask_price: snap.leg_b,
             timestamp_us: now,
         })
     }

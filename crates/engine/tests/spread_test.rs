@@ -1,4 +1,4 @@
-use engine::Engine;
+use engine::{Engine, SpreadDirection};
 use types::{Fixed64, Level, OrderBook};
 
 fn make_engine(spot_bid: f64, spot_ask: f64, perp_bid: f64, perp_ask: f64) -> Engine<20, 20> {
@@ -36,6 +36,9 @@ fn current_spread_normal_direction() {
     // spread = perp_ask - spot_bid = 50010 - 50000 = 10 USDT
     assert_eq!(snap.spread_raw, Fixed64::from_float(10.0).raw());
     assert!(!snap.inverted);
+    assert_eq!(snap.direction, SpreadDirection::Normal);
+    assert_eq!(snap.leg_a.raw(), Fixed64::from_float(50000.0).raw()); // spot_bid
+    assert_eq!(snap.leg_b.raw(), Fixed64::from_float(50010.0).raw()); // perp_ask
 }
 
 #[test]
@@ -64,6 +67,9 @@ fn current_spread_inverse_direction() {
     // inverse spread = spot_ask - perp_bid = 50015 - 50000 = 15 USDT
     assert_eq!(snap.spread_raw, Fixed64::from_float(15.0).raw());
     assert!(!snap.inverted);
+    assert_eq!(snap.direction, SpreadDirection::Inverse);
+    assert_eq!(snap.leg_a.raw(), Fixed64::from_float(50015.0).raw()); // spot_ask
+    assert_eq!(snap.leg_b.raw(), Fixed64::from_float(50000.0).raw()); // perp_bid
 }
 
 #[test]

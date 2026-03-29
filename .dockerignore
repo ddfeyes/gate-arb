@@ -1,0 +1,9 @@
+.git
+target/
+*.md
+docs/
+.env
+Dockerfile
+docker-compose*.yml
+nginx.conf
+.cargo/

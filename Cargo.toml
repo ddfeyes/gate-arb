@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/types", "crates/gateway-ws", "crates/engine", "crates/strategy", "crates/frontend-ws", "crates/order-manager"]
+members = ["crates/types", "crates/gateway-ws", "crates/engine", "crates/strategy", "crates/frontend-ws", "crates/order-manager", "crates/db", "crates/risk"]
 
 [package]
 name = "gate-arb"
@@ -16,6 +16,8 @@ engine = { path = "crates/engine" }
 frontend-ws = { path = "crates/frontend-ws" }
 strategy = { path = "crates/strategy" }
 gateway-ws = { path = "crates/gateway-ws" }
+db = { path = "crates/db" }
+risk = { path = "crates/risk" }
 
 [[bin]]
 name = "gate-arb"

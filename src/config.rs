@@ -38,6 +38,10 @@ pub struct Config {
     pub max_position_usd: u64,
     /// Paper trading mode — no real orders are placed.
     pub paper_mode: bool,
+    /// Gate.io API key — required for live trading, empty in paper mode.
+    pub api_key: String,
+    /// Gate.io API secret — required for live trading, empty in paper mode.
+    pub api_secret: String,
 }
 
 impl Config {
@@ -89,6 +93,12 @@ impl Config {
             .map(|v| v != "false")
             .unwrap_or(true);
 
+        // API credentials — required in live mode; empty string in paper mode is valid.
+        let api_key = std::env::var("GATE_API_KEY").unwrap_or_default();
+        let api_secret = std::env::var("GATE_API_SECRET")
+            .or_else(|_| std::env::var("GATE_SECRET"))
+            .unwrap_or_default();
+
         Self {
             spot_symbol,
             perp_symbol,
@@ -98,6 +108,8 @@ impl Config {
             health_port,
             max_position_usd,
             paper_mode,
+            api_key,
+            api_secret,
         }
     }
 
@@ -105,7 +117,7 @@ impl Config {
     pub fn log_effective(&self) {
         tracing::info!(
             "Config: spot={} perp={} threshold={}bps frontend_port={} health_port={} \
-             max_pos_usd={} paper_mode={}",
+             max_pos_usd={} paper_mode={} api_key_set={}",
             self.spot_symbol,
             self.perp_symbol,
             self.spread_threshold_bps,
@@ -113,7 +125,11 @@ impl Config {
             self.health_port,
             self.max_position_usd,
             self.paper_mode,
+            !self.api_key.is_empty(),
         );
+        if !self.paper_mode && self.api_key.is_empty() {
+            tracing::warn!("LIVE MODE but GATE_API_KEY is empty — order placement will fail");
+        }
     }
 }
 

@@ -184,6 +184,7 @@ dependencies = [
  "futures-util",
  "gateway-ws",
  "health",
+ "order-manager",
  "parking_lot",
  "serde",
  "serde_json",
@@ -664,6 +665,7 @@ version = "0.1.0"
 dependencies = [
  "engine",
  "parking_lot",
+ "tokio",
  "tracing",
  "types",
 ]

@@ -11,7 +11,7 @@ use tracing_subscriber::FmtSubscriber;
 mod args {
     pub const SPOT_SYMBOL: &str = "BTC_USDT";
     pub const PERP_SYMBOL: &str = "BTC_USDT";
-    pub const FRONTEND_PORT: u16 = 8080;
+    pub const FRONTEND_PORT: u16 = 8081;
     pub const GATE_WS_URL: &str = "wss://api.gateio.ws/ws/v4/";
 }
 

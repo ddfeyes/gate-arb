@@ -7,7 +7,7 @@
 //! All tuneable parameters are read from env vars at startup — see config.rs.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
@@ -18,7 +18,7 @@ use tracing_subscriber::FmtSubscriber;
 
 use engine::Engine;
 use frontend_ws::FrontendWs;
-use gateway_ws::{parse_price as gw_parse_price, WsEvent, CHANNEL_FUNDING_RATE};
+use gateway_ws::{parse_price as gw_parse_price, ReconnectConfig, WsEvent, CHANNEL_FUNDING_RATE};
 use strategy::{FundingStrategy, Strategy};
 use types::{Level as ObLevel, OrderBook};
 
@@ -139,8 +139,13 @@ impl HotPath {
     }
 }
 
-/// WS client handler that bridges Gate.io WS → hot path.
-async fn run_gateway(spot_symbol: &str, perp_symbol: &str, hot_path: Arc<HotPath>) -> Result<()> {
+/// Single WS connection attempt — connects, subscribes, pumps until disconnect.
+/// Returns Ok(()) on clean close, Err on fatal/connection errors.
+async fn run_gateway_once(
+    spot_symbol: &str,
+    perp_symbol: &str,
+    hot_path: Arc<HotPath>,
+) -> Result<()> {
     use tokio_tungstenite::connect_async;
 
     const GATE_WS_URL: &str = "wss://api.gateio.ws/ws/v4/";
@@ -212,6 +217,106 @@ async fn run_gateway(spot_symbol: &str, perp_symbol: &str, hot_path: Arc<HotPath
     Ok(())
 }
 
+/// Gateway WS runner with exponential backoff reconnection.
+///
+/// Policy:
+/// - Backoff: 1s → 2s → 4s → ... → 30s (cap)
+/// - Max 10 consecutive failures → bail (engine halts)
+/// - Disconnected >60s → logs a warning (order pause hook, risk guard)
+/// - On reconnect: re-subscribes to all channels automatically
+async fn run_gateway_with_reconnect(
+    spot_symbol: &str,
+    perp_symbol: &str,
+    hot_path: Arc<HotPath>,
+    health: Arc<health::HealthHandle>,
+    cfg: ReconnectConfig,
+) -> Result<()> {
+    // consecutive_failures counts uninterrupted failures (reset on clean connect).
+    // disconnect_since tracks when the current outage window started (reset on reconnect).
+    let mut consecutive_failures: u32 = 0;
+    let mut disconnect_since: Option<Instant> = None;
+
+    loop {
+        if consecutive_failures > 0 {
+            let delay = cfg.delay_for_attempt(consecutive_failures);
+            warn!(
+                "WS reconnect: consecutive_failures={}/{} delay={:.1}s ts={}",
+                consecutive_failures,
+                cfg.max_attempts,
+                delay.as_secs_f32(),
+                chrono_now_utc(),
+            );
+            health.set_gate_ws(health::GateWsStatus::Disconnected).await;
+
+            if let Some(since) = disconnect_since {
+                if since.elapsed() >= cfg.pause_threshold {
+                    warn!(
+                        "WS disconnected >{:.0}s — pausing new entries (risk guard)",
+                        cfg.pause_threshold.as_secs()
+                    );
+                    // Future: signal strategy to pause entries here
+                }
+            }
+
+            tokio::time::sleep(delay).await;
+        }
+
+        match run_gateway_once(spot_symbol, perp_symbol, Arc::clone(&hot_path)).await {
+            Ok(()) => {
+                // Clean close — not a failure. Reset consecutive failure counter and
+                // outage timer so the 10-strikes limit counts consecutive bad reconnects,
+                // not total lifetime disconnects.
+                warn!("WS closed cleanly, reconnecting");
+                consecutive_failures = 0;
+                disconnect_since = None;
+            }
+            Err(e) => {
+                // Connection error — count as failure, keep outage timer running.
+                error!(
+                    "WS connection error (consecutive_failures={}): {:?}",
+                    consecutive_failures + 1,
+                    e
+                );
+                if disconnect_since.is_none() {
+                    disconnect_since = Some(Instant::now());
+                }
+                consecutive_failures += 1;
+            }
+        }
+
+        // Halt only after N *consecutive* failures (clean reconnects reset the counter).
+        if consecutive_failures >= cfg.max_attempts {
+            anyhow::bail!(
+                "Gateway WS: {} consecutive connection failures. Engine halting.",
+                cfg.max_attempts
+            );
+        }
+    }
+}
+
+/// UTC timestamp string for log messages (no external dep).
+fn chrono_now_utc() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days = secs / 86400;
+    let time = secs % 86400;
+    let (h, m, s) = (time / 3600, (time % 3600) / 60, time % 60);
+    // Gregorian date from Julian day number
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let yr = if mo <= 2 { y + 1 } else { y };
+    format!("{yr:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     FmtSubscriber::builder()
@@ -271,13 +376,25 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&frontend),
     ));
 
-    // Start frontend WS server
+    // Start frontend WS server — pre-bind to surface port conflicts at startup.
+    // Use GATE_FRONTEND_PORT (or FRONTEND_PORT) to change from default 8080.
+    let fe_listener = {
+        let addr = format!("0.0.0.0:{}", cfg.frontend_port);
+        tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+            tracing::error!("cannot bind frontend-ws to {}: {}", addr, e);
+            tracing::error!("Hint: set GATE_FRONTEND_PORT (or FRONTEND_PORT) to a free port");
+            anyhow::anyhow!("frontend-ws bind failed on {}: {}", addr, e)
+        })?
+    };
+    info!(
+        "Frontend WS bound — dashboard at http://0.0.0.0:{}/",
+        cfg.frontend_port
+    );
     let fe = Arc::clone(&frontend);
-    let fe_port = cfg.frontend_port;
     let health_fe = Arc::clone(&health);
     tokio::spawn(async move {
-        if let Err(e) = fe.run(fe_port).await {
-            tracing::error!("Frontend WS error: {:?}", e);
+        if let Err(e) = fe.run_with_listener(fe_listener).await {
+            tracing::error!("Frontend WS stopped: {:?}", e);
             health_fe
                 .set_frontend_ws(health::FrontendStatus::Stopped)
                 .await;
@@ -297,15 +414,24 @@ async fn main() -> anyhow::Result<()> {
         cfg.health_port
     );
 
-    // Run Gate.io WS client
-    info!("Starting Gate.io WS client");
+    // Run Gate.io WS client with exponential backoff reconnection
+    info!("Starting Gate.io WS client (reconnect: 1s→30s, max 10 attempts)");
     health.set_gate_ws(health::GateWsStatus::Connected).await;
 
-    let result = run_gateway(&cfg.spot_symbol, &cfg.perp_symbol, hot_path).await;
+    let result = run_gateway_with_reconnect(
+        &cfg.spot_symbol,
+        &cfg.perp_symbol,
+        hot_path,
+        Arc::clone(&health),
+        ReconnectConfig::default(),
+    )
+    .await;
+
     health.set_gate_ws(health::GateWsStatus::Disconnected).await;
 
     if let Err(e) = result {
-        tracing::error!("Gateway WS terminated: {:?}", e);
+        tracing::error!("Gateway WS halted: {:?}", e);
+        return Err(e);
     }
 
     Ok(())

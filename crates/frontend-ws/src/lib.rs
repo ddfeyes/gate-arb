@@ -135,15 +135,27 @@ impl FrontendWs {
         }
     }
 
-    /// Start server on given port.
-    /// - WS connections get a live JSON stream at 500ms intervals.
-    /// - HTTP GET / returns the self-contained dashboard HTML.
+    /// Bind to `port` and start serving. Returns an error immediately if the port is unavailable.
+    /// Prefer [`run_with_listener`] when the caller needs to pre-bind for startup validation.
     pub async fn run(self: Arc<Self>, port: u16) -> anyhow::Result<()> {
         let addr = format!("0.0.0.0:{}", port);
-        let listener = TcpListener::bind(&addr).await?;
+        let listener = TcpListener::bind(&addr).await.map_err(|e| {
+            error!("cannot bind frontend-ws to {}: {}", addr, e);
+            error!("Hint: set GATE_FRONTEND_PORT (or FRONTEND_PORT) to a free port");
+            anyhow::anyhow!("frontend-ws bind failed on {}: {}", addr, e)
+        })?;
         info!("Frontend WS listening on ws://{}", addr);
         info!("Dashboard available at http://{}/", addr);
+        self.accept_loop(listener).await
+    }
 
+    /// Serve using a pre-bound [`TcpListener`]. Use from `main` so bind failures surface
+    /// as fatal startup errors rather than silent background failures.
+    pub async fn run_with_listener(self: Arc<Self>, listener: TcpListener) -> anyhow::Result<()> {
+        self.accept_loop(listener).await
+    }
+
+    async fn accept_loop(self: Arc<Self>, listener: TcpListener) -> anyhow::Result<()> {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {

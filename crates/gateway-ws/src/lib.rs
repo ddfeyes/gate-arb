@@ -116,3 +116,40 @@ pub fn parse_level(price_str: &str, qty_str: &str) -> Level {
         qty: qty_str.parse().unwrap_or(0),
     }
 }
+
+/// Reconnection policy for the gateway WS loop.
+///
+/// Exported here so integration tests can call `delay_for_attempt` directly
+/// without mirroring the formula.
+#[derive(Debug, Clone)]
+pub struct ReconnectConfig {
+    pub initial_delay: std::time::Duration,
+    pub max_delay: std::time::Duration,
+    /// Give up after this many *consecutive* failures.
+    pub max_attempts: u32,
+    /// If an outage lasts longer than this, warn about pausing new entries.
+    pub pause_threshold: std::time::Duration,
+}
+
+impl Default for ReconnectConfig {
+    fn default() -> Self {
+        Self {
+            initial_delay: std::time::Duration::from_secs(1),
+            max_delay: std::time::Duration::from_secs(30),
+            max_attempts: 10,
+            pause_threshold: std::time::Duration::from_secs(60),
+        }
+    }
+}
+
+impl ReconnectConfig {
+    /// Compute the backoff delay for a given attempt number (1-indexed).
+    ///
+    /// Formula: `initial * 2^(attempt-1)`, capped at `max_delay`.
+    /// The exponent is clamped to 5 (`attempt.min(5)`) to prevent u64 shift overflow.
+    pub fn delay_for_attempt(&self, attempt: u32) -> std::time::Duration {
+        debug_assert!(attempt >= 1, "attempt is 1-indexed");
+        let raw_ms = self.initial_delay.as_millis() as u64 * (1u64 << (attempt - 1).min(5));
+        std::time::Duration::from_millis(raw_ms).min(self.max_delay)
+    }
+}

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, fix/*]
+    branches: [main, fix/*, feat/*]
   pull_request:
     branches: [main]
 
@@ -44,3 +44,13 @@ jobs:
           else
             echo "Binary not found, skip size check"
           fi
+
+  docker-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint Dockerfile (hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error

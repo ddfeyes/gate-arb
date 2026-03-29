@@ -13,3 +13,4 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 types = { path = "../types" }
+fastrand = "2.0"

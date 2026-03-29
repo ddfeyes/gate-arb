@@ -254,6 +254,28 @@ pub struct OrderAck {
     pub status: OrderStatus,
 }
 
+// ─── Order Book Update (gateway → engine channel) ─────────────────────────────
+
+/// Raw order book level from Gate.io — string price + qty, parsed by engine.
+#[derive(Debug, Clone)]
+pub struct ObLevel {
+    pub price: String,
+    pub qty: String,
+}
+
+/// Order book update message sent from gateway-ws → engine via tokio channel.
+#[derive(Debug, Clone)]
+pub struct ObUpdateChannel {
+    /// Currency pair symbol, e.g. "BTC_USDT".
+    pub symbol: String,
+    /// Best bid levels.
+    pub bids: Vec<ObLevel>,
+    /// Best ask levels.
+    pub asks: Vec<ObLevel>,
+    /// Timestamp in microseconds from Gate.io.
+    pub t: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

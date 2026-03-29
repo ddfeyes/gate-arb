@@ -1,0 +1,30 @@
+## Summary
+
+Implements paper trading P&L tracking for issue #15.
+
+### Changes
+
+**PaperExecutor** (`crates/strategy/src/lib.rs`):
+- New struct that simulates entry/exit at signal prices
+- `on_entry_signal()`: creates `PaperPosition` on spread signal
+- `on_exit_signal()`: calculates P&L and pushes `TradeRecord` to DB ring
+- P&L formula: `(perp_entry - perp_exit) * size + (spot_exit - spot_entry) * size`
+
+**Strategy** (`crates/strategy/src/lib.rs`):
+- `paper_pos: RwLock<Option<PaperPosition>>` — tracks simulated position
+- `paper_exec: PaperExecutor` — handles paper trade simulation
+- `on_tick()`: opens paper position on spread signal, closes when spread collapses
+- Cumulative P&L updated in `cumulative_pnl` field
+
+**Frontend WS** (`crates/frontend-ws/src/lib.rs`):
+- `DashboardState`: new fields `cumulative_pnl_usd`, `total_trades`, `win_rate`
+- `refresh_stats()`: called before each 500ms WS broadcast, reads from DB stats
+- Cumulative P&L in USD (1e8 → float), total trade count, win rate %
+
+### Testing
+
+```
+cargo build --release  # ✅ passed
+```
+
+Closes #15

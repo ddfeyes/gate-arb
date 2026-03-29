@@ -28,6 +28,9 @@ types = { path = "crates/types" }
 name = "gate-arb"
 path = "src/main.rs"
 
+[dev-dependencies]
+gateway-ws = { path = "crates/gateway-ws" }
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

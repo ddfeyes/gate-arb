@@ -18,7 +18,7 @@ use tracing_subscriber::FmtSubscriber;
 
 use engine::Engine;
 use frontend_ws::FrontendWs;
-use gateway_ws::{parse_price as gw_parse_price, WsEvent, CHANNEL_FUNDING_RATE};
+use gateway_ws::{parse_price as gw_parse_price, ReconnectConfig, WsEvent, CHANNEL_FUNDING_RATE};
 use strategy::{FundingStrategy, Strategy};
 use types::{Level as ObLevel, OrderBook};
 
@@ -217,27 +217,6 @@ async fn run_gateway_once(
     Ok(())
 }
 
-/// Reconnection policy for the gateway WS loop.
-struct ReconnectConfig {
-    initial_delay: Duration,
-    max_delay: Duration,
-    /// Give up after this many consecutive failures.
-    max_attempts: u32,
-    /// If disconnected longer than this, pause new order entries (risk guard).
-    pause_threshold: Duration,
-}
-
-impl Default for ReconnectConfig {
-    fn default() -> Self {
-        Self {
-            initial_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(30),
-            max_attempts: 10,
-            pause_threshold: Duration::from_secs(60),
-        }
-    }
-}
-
 /// Gateway WS runner with exponential backoff reconnection.
 ///
 /// Policy:
@@ -252,16 +231,17 @@ async fn run_gateway_with_reconnect(
     health: Arc<health::HealthHandle>,
     cfg: ReconnectConfig,
 ) -> Result<()> {
-    let mut attempt: u32 = 0;
+    // consecutive_failures counts uninterrupted failures (reset on clean connect).
+    // disconnect_since tracks when the current outage window started (reset on reconnect).
+    let mut consecutive_failures: u32 = 0;
     let mut disconnect_since: Option<Instant> = None;
 
     loop {
-        if attempt > 0 {
-            let raw_ms = cfg.initial_delay.as_millis() as u64 * (1u64 << (attempt - 1).min(5));
-            let delay = Duration::from_millis(raw_ms).min(cfg.max_delay);
+        if consecutive_failures > 0 {
+            let delay = cfg.delay_for_attempt(consecutive_failures);
             warn!(
-                "WS reconnect: attempt={}/{} delay={:.1}s ts={}",
-                attempt,
+                "WS reconnect: consecutive_failures={}/{} delay={:.1}s ts={}",
+                consecutive_failures,
                 cfg.max_attempts,
                 delay.as_secs_f32(),
                 chrono_now_utc(),
@@ -283,31 +263,34 @@ async fn run_gateway_with_reconnect(
 
         match run_gateway_once(spot_symbol, perp_symbol, Arc::clone(&hot_path)).await {
             Ok(()) => {
-                warn!("WS closed cleanly, reconnecting (attempt {})", attempt + 1);
-                if disconnect_since.is_none() {
-                    disconnect_since = Some(Instant::now());
-                }
-                attempt += 1;
+                // Clean close — not a failure. Reset consecutive failure counter and
+                // outage timer so the 10-strikes limit counts consecutive bad reconnects,
+                // not total lifetime disconnects.
+                warn!("WS closed cleanly, reconnecting");
+                consecutive_failures = 0;
+                disconnect_since = None;
             }
             Err(e) => {
-                error!("WS error (attempt {}): {:?}", attempt + 1, e);
+                // Connection error — count as failure, keep outage timer running.
+                error!(
+                    "WS connection error (consecutive_failures={}): {:?}",
+                    consecutive_failures + 1,
+                    e
+                );
                 if disconnect_since.is_none() {
                     disconnect_since = Some(Instant::now());
                 }
-                attempt += 1;
+                consecutive_failures += 1;
             }
         }
 
-        if attempt > cfg.max_attempts {
+        // Halt only after N *consecutive* failures (clean reconnects reset the counter).
+        if consecutive_failures >= cfg.max_attempts {
             anyhow::bail!(
-                "Gateway WS: {} consecutive reconnect failures. Engine halting.",
+                "Gateway WS: {} consecutive connection failures. Engine halting.",
                 cfg.max_attempts
             );
         }
-
-        // Successful session resets counters — but we only get here on disconnect.
-        // Reset logic: once reconnect succeeds (no error on next loop iteration),
-        // the attempt counter and timer will be reset.
     }
 }
 

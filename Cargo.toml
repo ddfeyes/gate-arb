@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/types", "crates/gateway-ws", "crates/engine", "crates/strategy", "crates/frontend-ws", "crates/order-manager", "crates/health"]
+members = ["crates/types", "crates/gateway-ws", "crates/engine", "crates/strategy", "crates/frontend-ws", "crates/order-manager", "crates/health", "crates/db"]
 
 [package]
 name = "gate-arb"

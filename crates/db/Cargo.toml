@@ -1,0 +1,13 @@
+[package]
+name = "db"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }

@@ -6,7 +6,9 @@
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
@@ -88,13 +90,20 @@ struct ObSnapshot {
 /// Connected session state.
 pub struct GatewayWs {
     ws_url: &'static str,
+    ob_tx: Option<Arc<Mutex<mpsc::Sender<(String, Vec<Level>, Vec<Level>)>>>>,
 }
 
 impl GatewayWs {
     pub fn new() -> Self {
         Self {
             ws_url: GATE_WS_URL,
+            ob_tx: None,
         }
+    }
+
+    /// Inject the order book update channel sender.
+    pub fn set_ob_tx(&mut self, tx: mpsc::Sender<(String, Vec<Level>, Vec<Level>)>) {
+        self.ob_tx = Some(Arc::new(Mutex::new(tx)));
     }
 
     /// Connect and run the WebSocket session.
@@ -179,7 +188,22 @@ impl GatewayWs {
             update.bids.len(),
             update.asks.len()
         );
-        // Real processing happens in engine — gateway just receives and logs
+
+        let bids: Vec<Level> = update
+            .bids
+            .into_iter()
+            .map(|(p, q)| parse_level(&p, &q))
+            .collect();
+        let asks: Vec<Level> = update
+            .asks
+            .into_iter()
+            .map(|(p, q)| parse_level(&p, &q))
+            .collect();
+
+        if let Some(ref tx_arc) = self.ob_tx {
+            let tx = tx_arc.lock().await;
+            let _ = tx.try_send((update.s.clone(), bids, asks));
+        }
     }
 
     /// Parse a price string to Fixed64 without allocating.

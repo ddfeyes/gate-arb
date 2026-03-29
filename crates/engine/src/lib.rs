@@ -4,10 +4,11 @@
 
 use parking_lot::RwLock;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 #[allow(unused_imports)]
 use tracing::info;
 
-use types::{Fixed64, OrderBook, SpreadSignal, SCALE};
+use types::{Fixed64, Level, OrderBook, SpreadSignal, SCALE};
 
 /// Hot engine state — lock-free read path.
 pub struct Engine<const B: usize, const A: usize> {
@@ -58,6 +59,46 @@ impl<const B: usize, const A: usize> Engine<B, A> {
             })
         } else {
             None
+        }
+    }
+
+    /// Spawn a background task that receives OB updates from the gateway
+    /// and applies them to the spot/perp order books.
+    pub fn spawn_ob_receiver(
+        self: &Arc<Self>,
+        mut rx: mpsc::Receiver<(String, Vec<Level>, Vec<Level>)>,
+        spot_symbol: String,
+        perp_symbol: String,
+    ) {
+        let spot_book = Arc::clone(&self.spot_book);
+        let perp_book = Arc::clone(&self.perp_book);
+
+        tokio::spawn(async move {
+            while let Some((symbol, bids, asks)) = rx.recv().await {
+                if symbol == spot_symbol {
+                    let mut book = spot_book.write();
+                    book.update_bids(&bids);
+                    book.update_asks(&asks);
+                } else if symbol == perp_symbol {
+                    let mut book = perp_book.write();
+                    book.update_bids(&bids);
+                    book.update_asks(&asks);
+                }
+            }
+        });
+    }
+
+    /// Apply an order book update to a specific book.
+    pub fn update_book(&self, symbol: &str, bids: Vec<Level>, asks: Vec<Level>) {
+        let is_spot = symbol == "BTC_USDT" || symbol == "BTC_USD";
+        if is_spot {
+            let mut book = self.spot_book.write();
+            book.update_bids(&bids);
+            book.update_asks(&asks);
+        } else {
+            let mut book = self.perp_book.write();
+            book.update_bids(&bids);
+            book.update_asks(&asks);
         }
     }
 }

@@ -16,8 +16,8 @@ use tracing_subscriber::FmtSubscriber;
 
 use engine::Engine;
 use frontend_ws::FrontendWs;
-use gateway_ws::{parse_price as gw_parse_price, WsEvent};
-use strategy::Strategy;
+use gateway_ws::{parse_price as gw_parse_price, WsEvent, CHANNEL_FUNDING_RATE};
+use strategy::{FundingStrategy, Strategy};
 use types::{Level as ObLevel, OrderBook};
 
 mod args {
@@ -56,6 +56,7 @@ fn parse_ob_level(price_str: &str, qty_str: &str) -> ObLevel {
 struct HotPath {
     engine: Arc<Engine<20, 20>>,
     strategy: Arc<Strategy>,
+    funding_strategy: Arc<FundingStrategy>,
     frontend: Arc<FrontendWs>,
 }
 
@@ -63,17 +64,19 @@ impl HotPath {
     fn new(
         engine: Arc<Engine<20, 20>>,
         strategy: Arc<Strategy>,
+        funding_strategy: Arc<FundingStrategy>,
         frontend: Arc<FrontendWs>,
     ) -> Self {
         Self {
             engine,
             strategy,
+            funding_strategy,
             frontend,
         }
     }
 
     fn process_text(&self, text: &str) {
-        // Try to parse as order book update
+        // Try to parse as order book update or funding rate
         if let Ok(evt) = serde_json::from_str::<WsEvent>(text) {
             match evt {
                 WsEvent::SpotOb(update) => {
@@ -82,20 +85,46 @@ impl HotPath {
                 WsEvent::FuturesOb(update) => {
                     self.process_ob_update(update, &self.engine.perp_book);
                 }
+                WsEvent::FundingRate(payload) => {
+                    // Warm path: update funding strategy
+                    let update = payload.to_update();
+                    self.funding_strategy.on_funding_rate(update);
+                    // Trigger warm tick with current prices
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64;
+                    let spot_price = self.engine.spot_book.read().best_bid().map(|p| p.raw());
+                    let perp_price = self.engine.perp_book.read().best_ask().map(|p| p.raw());
+                    self.funding_strategy.on_warm_tick(now_ms, spot_price, perp_price);
+                }
                 WsEvent::SpotTrades(_) => {}
             }
         }
-        // Strategy tick (checks spread + paper simulation)
+        // Strategy tick (spread arb — checks spread + paper simulation)
         self.strategy.on_tick();
+        // Funding warm tick — also check on every book update (not just rate update)
+        {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            let spot_price = self.engine.spot_book.read().best_bid().map(|p| p.raw());
+            let perp_price = self.engine.perp_book.read().best_ask().map(|p| p.raw());
+            self.funding_strategy.on_warm_tick(now_ms, spot_price, perp_price);
+        }
         // Frontend PnL broadcast
         let stats = self.strategy.get_paper_stats();
         let pnl = self.strategy.get_pnl();
+        let funding_stats = self.funding_strategy.get_stats();
+        let total_funding_pnl = funding_stats.total_funding_collected_raw;
         self.frontend.update_pnl(
-            pnl,
-            stats.total_trades,
-            stats.wins,
-            stats.losses,
-            self.strategy.is_position_open(),
+            pnl + total_funding_pnl,
+            stats.total_trades + funding_stats.total_cycles,
+            stats.wins + funding_stats.profitable_cycles,
+            stats.losses
+                + funding_stats.total_cycles.saturating_sub(funding_stats.profitable_cycles),
+            self.strategy.is_position_open() || self.funding_strategy.is_position_open(),
         );
     }
 
@@ -154,6 +183,15 @@ async fn run_gateway(spot_symbol: &str, perp_symbol: &str, hot_path: Arc<HotPath
     }))?;
     write.send(Message::Text(futures_sub.into())).await?;
     debug!("Subscribed to futures.order_book");
+
+    // Subscribe to futures funding rate
+    let funding_sub = serde_json::to_string(&serde_json::json!({
+        "channel": CHANNEL_FUNDING_RATE,
+        "event": "subscribe",
+        "payload": [perp_symbol]
+    }))?;
+    write.send(Message::Text(funding_sub.into())).await?;
+    debug!("Subscribed to futures.funding_rate");
 
     let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
 
@@ -228,12 +266,25 @@ async fn main() -> anyhow::Result<()> {
     // threshold 25B raw ≈ 50bps on BTC at $50k
     let strategy = Arc::new(strategy::Strategy::new(Arc::clone(&engine), 25_000_000_000));
 
+    // Funding arb strategy (paper mode by default)
+    let paper_mode = std::env::var("PAPER_MODE")
+        .map(|v| v != "false")
+        .unwrap_or(true);
+    let funding_strategy = Arc::new(FundingStrategy::new(paper_mode));
+    info!(
+        "Funding arb strategy: paper_mode={} threshold={:.1}bps entry_window={}s",
+        paper_mode,
+        funding_strategy.entry_threshold_bps,
+        300
+    );
+
     let frontend = Arc::new(frontend_ws::FrontendWs::new());
 
     // Hot path coordinator
     let hot_path = Arc::new(HotPath::new(
         Arc::clone(&engine),
         Arc::clone(&strategy),
+        Arc::clone(&funding_strategy),
         Arc::clone(&frontend),
     ));
 

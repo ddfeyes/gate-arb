@@ -166,6 +166,7 @@ dependencies = [
  "engine",
  "frontend-ws",
  "gateway-ws",
+ "health",
  "strategy",
  "tokio",
  "tracing",
@@ -207,6 +208,17 @@ dependencies = [
  "libc",
  "r-efi",
  "wasip2",
+]
+
+[[package]]
+name = "health"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "types",
 ]
 
 [[package]]

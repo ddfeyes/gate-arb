@@ -1,17 +1,19 @@
 //! gateway-ws — Gate.io WebSocket v4 client.
 //!
-//! Handles: auth, subscribe spot.order_book + futures.order_book, heartbeat.
+//! Handles: auth, subscribe spot.order_book + futures.order_book,
+//! futures.funding_rate, heartbeat.
 //! All inbound messages are parsed in <1ms hot path — no heap serde.
 //!
 //! The WS client loop lives in main.rs (run_gateway function) to avoid
 //! circular deps with engine/strategy crates.
 
 use serde::{Deserialize, Serialize};
-use types::{Fixed64, Level, SCALE};
+use types::{Fixed64, FundingRateUpdate, Level, SCALE};
 
 /// Gate.io WebSocket v4 channel names.
 pub const CHANNEL_SPOT_OB: &str = "spot.order_book";
 pub const CHANNEL_FUTURES_OB: &str = "futures.order_book";
+pub const CHANNEL_FUNDING_RATE: &str = "futures.funding_rate";
 
 /// Subscribe message.
 #[derive(Serialize)]
@@ -43,6 +45,38 @@ pub struct ObUpdate {
     pub asks: Vec<(String, String)>,
 }
 
+/// Gate.io futures.funding_rate WS result payload.
+///
+/// Example from Gate.io v4 docs:
+/// ```json
+/// {
+///   "channel": "futures.funding_rate",
+///   "event": "update",
+///   "result": { "contract": "BTC_USDT", "r": "0.0001", "t": 1609459200000 }
+/// }
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+pub struct FundingRatePayload {
+    /// Contract name, e.g. "BTC_USDT".
+    pub contract: String,
+    /// Funding rate as string (e.g. "0.0001" = 0.01%).
+    pub r: String,
+    /// Timestamp in milliseconds.
+    pub t: u64,
+}
+
+impl FundingRatePayload {
+    /// Convert to the shared `FundingRateUpdate` type.
+    pub fn to_update(&self) -> FundingRateUpdate {
+        let rate = self.r.parse::<f64>().unwrap_or(0.0);
+        FundingRateUpdate {
+            contract: self.contract.clone(),
+            rate_raw: (rate * types::SCALE as f64) as i64,
+            timestamp_ms: self.t,
+        }
+    }
+}
+
 /// Order book update event envelope.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "channel")]
@@ -54,6 +88,8 @@ pub enum WsEvent {
     #[serde(rename = "spot.trades")]
     #[allow(dead_code)]
     SpotTrades(ObUpdate),
+    #[serde(rename = "futures.funding_rate")]
+    FundingRate(FundingRatePayload),
 }
 
 /// Parse a price string to Fixed64 without allocating.

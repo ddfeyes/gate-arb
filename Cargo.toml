@@ -15,7 +15,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 futures-util = "0.3"
-tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls"] }
 parking_lot = "0.12"
 engine = { path = "crates/engine" }
 frontend-ws = { path = "crates/frontend-ws" }
@@ -36,7 +36,7 @@ license = "MIT"
 
 [workspace.dependencies]
 tokio = { version = "1.44", features = ["full"] }
-tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls"] }
 futures-util = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

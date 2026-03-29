@@ -217,6 +217,33 @@ impl ArbitragePosition {
     }
 }
 
+/// Funding rate update from Gate.io futures.funding_rate WS channel.
+///
+/// Gate.io pays funding every 8 hours.
+/// rate_raw is stored with SCALE precision: rate_raw = rate * SCALE.
+/// e.g. 0.0001 funding rate → rate_raw = 10_000
+#[derive(Debug, Clone)]
+pub struct FundingRateUpdate {
+    /// Contract name, e.g. "BTC_USDT".
+    pub contract: String,
+    /// Funding rate in fixed-point (rate * SCALE). Positive = longs pay shorts.
+    pub rate_raw: i64,
+    /// Timestamp in milliseconds when update was received.
+    pub timestamp_ms: u64,
+}
+
+impl FundingRateUpdate {
+    /// Rate as f64 (e.g. 0.0001 = 0.01%).
+    pub fn rate_f64(&self) -> f64 {
+        self.rate_raw as f64 / SCALE as f64
+    }
+
+    /// Rate in basis points (bps).
+    pub fn rate_bps(&self) -> f64 {
+        self.rate_f64() * 10_000.0
+    }
+}
+
 /// Command sent from hot/warm thread → OrderManager.
 #[derive(Debug, Clone)]
 pub enum OrderCmd {

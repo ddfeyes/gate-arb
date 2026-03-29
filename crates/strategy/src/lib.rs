@@ -3,6 +3,9 @@
 //! Paper-trading first: logs signals, does not execute.
 //! Thread 2 (warm): position management, risk, funding monitor.
 
+pub mod funding;
+pub use funding::FundingStrategy;
+
 use parking_lot::RwLock;
 use std::sync::Arc;
 use tracing::{info, warn};

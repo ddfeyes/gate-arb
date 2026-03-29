@@ -14,11 +14,28 @@ use tracing::{error, info};
 const MAX_LOG_ENTRIES: usize = 100;
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PnlUpdate {
+    #[serde(rename = "type")]
+    pub msg_type: &'static str,
+    pub total_trades: u64,
+    pub wins: u64,
+    pub losses: u64,
+    pub pnl_usd: f64,
+    pub pnl_pct: f64,
+    pub last_signal_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DashboardState {
     pub spread_bps: f64,
     pub bid_price: f64,
     pub ask_price: f64,
     pub pnl_raw: i64,
+    pub pnl_usd: f64,
+    pub pnl_pct: f64,
+    pub total_trades: u64,
+    pub wins: u64,
+    pub losses: u64,
     pub position_open: bool,
     pub recent_logs: Vec<String>,
 }
@@ -36,6 +53,11 @@ impl FrontendWs {
                 bid_price: 0.0,
                 ask_price: 0.0,
                 pnl_raw: 0,
+                pnl_usd: 0.0,
+                pnl_pct: 0.0,
+                total_trades: 0,
+                wins: 0,
+                losses: 0,
                 position_open: false,
                 recent_logs: Vec::new(),
             })),
@@ -48,6 +70,31 @@ impl FrontendWs {
         s.spread_bps = spread_bps;
         s.bid_price = bid_price;
         s.ask_price = ask_price;
+    }
+
+    pub fn update_pnl(
+        &self,
+        pnl_raw: i64,
+        total_trades: u64,
+        wins: u64,
+        losses: u64,
+        position_open: bool,
+    ) {
+        let mut s = self.state.write();
+        s.pnl_raw = pnl_raw;
+        s.pnl_usd = pnl_raw as f64 / 100_000_000.0;
+        // PnL % is relative to a notional base (e.g. 0.01 BTC * $50k ≈ $500)
+        // Use a fixed notional of $500 for display purposes
+        const NOTIONAL_USD: f64 = 500.0;
+        s.pnl_pct = if NOTIONAL_USD > 0.0 {
+            (s.pnl_usd / NOTIONAL_USD) * 100.0
+        } else {
+            0.0
+        };
+        s.total_trades = total_trades;
+        s.wins = wins;
+        s.losses = losses;
+        s.position_open = position_open;
     }
 
     pub fn log(&self, msg: String) {

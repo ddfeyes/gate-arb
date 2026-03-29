@@ -12,11 +12,17 @@ tokio = { version = "1.44", features = ["full"] }
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+futures-util = "0.3"
+tokio-tungstenite = "0.26"
+parking_lot = "0.12"
 engine = { path = "crates/engine" }
 frontend-ws = { path = "crates/frontend-ws" }
 strategy = { path = "crates/strategy" }
 gateway-ws = { path = "crates/gateway-ws" }
 health = { path = "crates/health" }
+types = { path = "crates/types" }
 
 [[bin]]
 name = "gate-arb"

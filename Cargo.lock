@@ -165,12 +165,18 @@ dependencies = [
  "anyhow",
  "engine",
  "frontend-ws",
+ "futures-util",
  "gateway-ws",
  "health",
+ "parking_lot",
+ "serde",
+ "serde_json",
  "strategy",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+ "types",
 ]
 
 [[package]]

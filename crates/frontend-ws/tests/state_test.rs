@@ -1,4 +1,4 @@
-use frontend_ws::FrontendWs;
+use frontend_ws::{is_ws_upgrade, FrontendWs};
 
 #[test]
 fn update_spread_and_prices() {
@@ -71,6 +71,28 @@ fn state_serializes_to_json() {
     assert!(json.contains("timestamp_ms"));
     assert!(json.contains("recent_logs"));
     assert!(json.contains("test event"));
+}
+
+#[test]
+fn ws_upgrade_header_case_insensitive() {
+    // Standard lowercase (common in Chrome, Firefox)
+    assert!(is_ws_upgrade(
+        "GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+    ));
+    // Capital-W as sent by some browsers/proxies (RFC 7230 case-insensitive)
+    assert!(is_ws_upgrade(
+        "GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: WebSocket\r\nConnection: Upgrade\r\n\r\n"
+    ));
+    // Mixed case
+    assert!(is_ws_upgrade(
+        "GET / HTTP/1.1\r\nUpgrade: WebSOCKET\r\nConnection: Upgrade\r\n\r\n"
+    ));
+    // Plain browser GET — must NOT be detected as WS
+    assert!(!is_ws_upgrade(
+        "GET / HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\n"
+    ));
+    // Empty
+    assert!(!is_ws_upgrade(""));
 }
 
 #[test]

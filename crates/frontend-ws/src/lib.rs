@@ -25,6 +25,17 @@ const MAX_LOG_ENTRIES: usize = 100;
 /// Embedded dashboard HTML served at HTTP GET /.
 pub const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
+/// Returns true if `request_text` contains a WebSocket upgrade header.
+///
+/// RFC 7230 §3.2: header field values are case-insensitive.
+/// Handles "Upgrade: websocket", "Upgrade: WebSocket", etc.
+#[inline]
+pub fn is_ws_upgrade(request_text: &str) -> bool {
+    request_text
+        .to_ascii_lowercase()
+        .contains("upgrade: websocket")
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardState {
     pub spread_bps: f64,
@@ -37,7 +48,7 @@ pub struct DashboardState {
     pub wins: u64,
     pub losses: u64,
     pub position_open: bool,
-    /// Funding rate in basis points × 100 (e.g. 10 = 0.10%).
+    /// Funding rate in integer basis points (e.g. 150 = 1.50% per 8 h).
     pub funding_rate_bps: i64,
     /// Unix epoch ms when state was last updated.
     pub timestamp_ms: u64,
@@ -100,7 +111,10 @@ impl FrontendWs {
         s.timestamp_ms = now_ms();
     }
 
-    /// Update the latest funding rate (in basis points × 100, i.e. hundredths of a bps).
+    /// Update the latest funding rate.
+    ///
+    /// Unit: integer basis points (1 bps = 0.01%). So `150` means 1.50% per 8 h.
+    /// The dashboard divides by 100 to display as a percentage.
     pub fn update_funding_rate(&self, funding_rate_bps: i64) {
         let mut s = self.state.write();
         s.funding_rate_bps = funding_rate_bps;
@@ -145,34 +159,23 @@ impl FrontendWs {
         }
     }
 
-    /// Peek at the first bytes to decide HTTP vs WebSocket.
+    /// Peek at up to 4 KB of the request to decide HTTP vs WebSocket upgrade.
+    ///
+    /// RFC 7230 §3.2 — header field values are case-insensitive.
+    /// We lowercase the entire peeked buffer before checking for "upgrade: websocket"
+    /// so "Upgrade: WebSocket", "upgrade: websocket", or any mix all route correctly.
     async fn dispatch(&self, stream: tokio::net::TcpStream) -> anyhow::Result<()> {
-        // Peek at up to 8 bytes to detect HTTP vs WebSocket upgrade
-        let mut peek_buf = [0u8; 8];
-        let n = stream.peek(&mut peek_buf).await?;
-        let header = &peek_buf[..n];
+        let mut buf = vec![0u8; 4096];
+        let n = stream.peek(&mut buf).await?;
 
-        // WebSocket upgrade starts with "GET " too, but has "Upgrade: websocket" header.
-        // The simplest heuristic: check if it looks like a plain HTTP request without
-        // the Upgrade token by reading the first line. We do this by checking for
-        // "Connection: Upgrade" anywhere in the peek — but peek is too small.
-        // Better: always try WS upgrade; if no Upgrade header, fall through to HTTP.
-        // tokio-tungstenite's accept_async returns an error if no Upgrade header is present.
-
-        // If bytes don't look like HTTP at all, close.
-        if n == 0 || !header.starts_with(b"GET") {
+        // Not enough bytes or not an HTTP request — close silently.
+        if n < 4 || !buf[..n].starts_with(b"GET") {
             return Ok(());
         }
 
-        // Try WebSocket upgrade first. On failure, serve HTTP.
-        // We must re-read the stream from the start, so this only works if
-        // tokio-tungstenite doesn't consume bytes on failure.
-        // Strategy: buffer full HTTP request, check for "Upgrade: websocket".
-        // Read up to 4KB to find the header line.
-        let mut buf = vec![0u8; 4096];
-        let nr = stream.peek(&mut buf).await?;
-        let req = std::str::from_utf8(&buf[..nr]).unwrap_or("");
-        let is_ws = req.contains("Upgrade: websocket") || req.contains("upgrade: websocket");
+        // Case-insensitive check for WebSocket upgrade header (RFC 7230).
+        // Covers: "Upgrade: websocket", "Upgrade: WebSocket", proxy variants, etc.
+        let is_ws = is_ws_upgrade(std::str::from_utf8(&buf[..n]).unwrap_or(""));
 
         if is_ws {
             self.handle_ws(stream).await

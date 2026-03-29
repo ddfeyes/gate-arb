@@ -53,7 +53,7 @@ pub struct Strategy {
     /// Tick counter for summary printing.
     tick_counter: RwLock<u64>,
     /// Optional DB writer — write trade records and spread snapshots.
-    db: Option<DbWriter>,
+    db_writer: Option<DbWriter>,
 }
 
 impl Strategy {
@@ -71,13 +71,13 @@ impl Strategy {
             cumulative_pnl: RwLock::new(0),
             paper_stats: RwLock::new(PaperStats::default()),
             tick_counter: RwLock::new(0),
-            db: None,
+            db_writer: None,
         }
     }
 
     /// Wire in a DbWriter for trade and spread logging.
     pub fn set_db(&mut self, db: DbWriter) {
-        self.db = Some(db);
+        self.db_writer = Some(db);
     }
 
     /// Called every tick from the hot path — check spread, emit signals.
@@ -98,7 +98,7 @@ impl Strategy {
             }
 
             // Write spread snapshot to DB on every signal (sampled — only when threshold fires)
-            if let Some(ref db) = self.db {
+            if let Some(ref db) = self.db_writer {
                 db.write_spread(DbSpreadSnapshot {
                     ts_us: sig.timestamp_us,
                     spread_raw: sig.spread_raw as i64,
@@ -283,7 +283,7 @@ impl Strategy {
         );
 
         // Write trade record to DB
-        if let Some(ref db) = self.db {
+        if let Some(ref db) = self.db_writer {
             db.write_trade(TradeRecord {
                 opened_at_us: pos.opened_at_us,
                 closed_at_us: now,

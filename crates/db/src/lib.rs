@@ -137,10 +137,14 @@ impl DbWriter {
         }
     }
 
-    /// Signal the background task to flush and exit.
-    /// After calling this, further writes are dropped.
-    pub fn shutdown(&self) {
-        let _ = self.tx.try_send(DbCmd::Shutdown);
+    /// Signal the background task to flush and exit, then await its completion.
+    ///
+    /// Uses an async send (`.send().await`) instead of `try_send` so the Shutdown
+    /// sentinel is **guaranteed** to be delivered even when the channel is at
+    /// capacity (e.g. during a spread burst). Callers must `.await` this.
+    pub async fn shutdown(self) {
+        // Ignore send error — task already exited (all DbWriter clones dropped).
+        let _ = self.tx.send(DbCmd::Shutdown).await;
     }
 }
 
@@ -236,7 +240,9 @@ pub struct DbReader {
 impl DbReader {
     pub fn open<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA query_only = ON;")?;
+        // query_only = ON is sufficient for a read-only handle.
+        // PRAGMA journal_mode is omitted — it would silently fail under query_only anyway.
+        conn.execute_batch("PRAGMA query_only = ON;")?;
         Ok(Self { conn })
     }
 

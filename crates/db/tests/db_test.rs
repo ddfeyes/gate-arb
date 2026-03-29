@@ -19,9 +19,9 @@ fn sample_trade(pnl_raw: i64, paper: bool) -> TradeRecord {
     }
 }
 
-fn sample_spread(spread_raw: i64, inverted: bool) -> SpreadSnapshot {
+fn sample_spread(ts_us: u64, spread_raw: i64, inverted: bool) -> SpreadSnapshot {
     SpreadSnapshot {
-        ts_us: 1_500_000,
+        ts_us,
         spread_raw,
         inverted,
         spot_price_raw: 50_000_00_000_000,
@@ -48,8 +48,7 @@ async fn write_and_read_trade() {
 
     writer.write_trade(sample_trade(1_000_000, true));
     sleep(Duration::from_millis(50)).await;
-    writer.shutdown();
-    sleep(Duration::from_millis(50)).await;
+    writer.shutdown().await;
 
     let reader = DbReader::open(&path).expect("open reader");
     let trades = reader.recent_trades(10).expect("recent_trades");
@@ -65,17 +64,17 @@ async fn write_and_read_trade() {
 async fn write_and_read_spread() {
     let (writer, _handle, path) = temp_db().await;
 
-    writer.write_spread(sample_spread(5_000_000, false));
-    writer.write_spread(sample_spread(-2_000_000, true));
+    // Distinct ts_us values so ORDER BY ts_us DESC is deterministic (no ties).
+    writer.write_spread(sample_spread(1_500_000, 5_000_000, false));
+    writer.write_spread(sample_spread(1_500_001, -2_000_000, true));
     sleep(Duration::from_millis(50)).await;
-    writer.shutdown();
-    sleep(Duration::from_millis(50)).await;
+    writer.shutdown().await;
 
     let reader = DbReader::open(&path).expect("open reader");
     let spreads = reader.recent_spreads(10).expect("recent_spreads");
     assert_eq!(spreads.len(), 2);
-    // newest first
-    assert!(spreads[0].inverted); // -2_000_000 inserted second
+    // newest first: ts_us=1_500_001 (inverted=true) must come before ts_us=1_500_000
+    assert!(spreads[0].inverted);
 
     let _ = std::fs::remove_file(path);
 }
@@ -88,8 +87,7 @@ async fn pnl_summary_correct() {
     writer.write_trade(sample_trade(-500_000, true));
     writer.write_trade(sample_trade(1_000_000, false));
     sleep(Duration::from_millis(80)).await;
-    writer.shutdown();
-    sleep(Duration::from_millis(50)).await;
+    writer.shutdown().await;
 
     let reader = DbReader::open(&path).expect("open reader");
     let summary = reader.pnl_summary().expect("pnl_summary");
@@ -108,8 +106,7 @@ async fn recent_trades_limit() {
         writer.write_trade(sample_trade(i * 100_000, true));
     }
     sleep(Duration::from_millis(80)).await;
-    writer.shutdown();
-    sleep(Duration::from_millis(50)).await;
+    writer.shutdown().await;
 
     let reader = DbReader::open(&path).expect("open reader");
     let trades = reader.recent_trades(3).expect("recent_trades");
@@ -133,15 +130,13 @@ async fn schema_idempotent_reopen() {
         let (w, _h) = DbWriter::open(&path).expect("first open");
         w.write_trade(sample_trade(100, true));
         sleep(Duration::from_millis(30)).await;
-        w.shutdown();
-        sleep(Duration::from_millis(30)).await;
+        w.shutdown().await;
     }
     {
         let (w, _h) = DbWriter::open(&path).expect("second open");
         w.write_trade(sample_trade(200, false));
         sleep(Duration::from_millis(30)).await;
-        w.shutdown();
-        sleep(Duration::from_millis(30)).await;
+        w.shutdown().await;
     }
 
     let reader = DbReader::open(&path).expect("reader");
@@ -153,10 +148,9 @@ async fn schema_idempotent_reopen() {
 #[tokio::test]
 async fn write_spread_empty_db_returns_zero_pnl() {
     let (writer, _handle, path) = temp_db().await;
-    writer.write_spread(sample_spread(1_000, false));
+    writer.write_spread(sample_spread(1_500_000, 1_000, false));
     sleep(Duration::from_millis(50)).await;
-    writer.shutdown();
-    sleep(Duration::from_millis(30)).await;
+    writer.shutdown().await;
 
     let reader = DbReader::open(&path).expect("reader");
     let summary = reader.pnl_summary().expect("pnl");

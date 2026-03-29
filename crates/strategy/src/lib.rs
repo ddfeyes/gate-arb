@@ -13,6 +13,7 @@
 pub mod funding;
 pub use funding::FundingStrategy;
 
+use db::{DbWriter, SpreadSnapshot as DbSpreadSnapshot, TradeRecord};
 use engine::Engine;
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -51,6 +52,8 @@ pub struct Strategy {
     paper_stats: RwLock<PaperStats>,
     /// Tick counter for summary printing.
     tick_counter: RwLock<u64>,
+    /// Optional DB writer — write trade records and spread snapshots.
+    db: Option<DbWriter>,
 }
 
 impl Strategy {
@@ -68,7 +71,13 @@ impl Strategy {
             cumulative_pnl: RwLock::new(0),
             paper_stats: RwLock::new(PaperStats::default()),
             tick_counter: RwLock::new(0),
+            db: None,
         }
+    }
+
+    /// Wire in a DbWriter for trade and spread logging.
+    pub fn set_db(&mut self, db: DbWriter) {
+        self.db = Some(db);
     }
 
     /// Called every tick from the hot path — check spread, emit signals.
@@ -86,6 +95,17 @@ impl Strategy {
             {
                 let mut stats = self.paper_stats.write();
                 stats.last_signal_at_us = Some(sig.timestamp_us);
+            }
+
+            // Write spread snapshot to DB on every signal (sampled — only when threshold fires)
+            if let Some(ref db) = self.db {
+                db.write_spread(DbSpreadSnapshot {
+                    ts_us: sig.timestamp_us,
+                    spread_raw: sig.spread_raw as i64,
+                    inverted: false, // signal fires on positive spread only
+                    spot_price_raw: sig.bid_price.raw() as i64,
+                    perp_price_raw: sig.ask_price.raw() as i64,
+                });
             }
 
             if self.position.read().is_none() {
@@ -261,6 +281,27 @@ impl Strategy {
             pnl_after as f64 / SCALE as f64,
             hold_time / 1_000_000
         );
+
+        // Write trade record to DB
+        if let Some(ref db) = self.db {
+            db.write_trade(TradeRecord {
+                opened_at_us: pos.opened_at_us,
+                closed_at_us: now,
+                entry_price_raw: spot_buy_price as i64,
+                exit_price_raw: spot_exit_price as i64,
+                size_raw: qty as i64,
+                pnl_raw: trade_pnl_raw,
+                pnl_pct_raw: if spot_buy_price > 0 {
+                    (trade_pnl_raw as i128 * 1_000_000_i128
+                        / (spot_buy_price as i128 * qty as i128 / SCALE as i128))
+                        as i64
+                } else {
+                    0
+                },
+                exit_reason: reason.to_string(),
+                paper: self.paper_mode,
+            });
+        }
 
         pos.state = TradeState::Closed;
         *pos_guard = None;

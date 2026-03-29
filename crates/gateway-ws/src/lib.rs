@@ -7,7 +7,7 @@ use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
@@ -91,6 +91,12 @@ struct ObSnapshot {
 pub struct GatewayWs {
     ws_url: &'static str,
     ob_tx: Option<Arc<Mutex<mpsc::Sender<(String, Vec<Level>, Vec<Level>)>>>>,
+    /// Optional risk manager for ping latency monitoring.
+    risk: Option<Arc<risk::RiskManager>>,
+    /// Timestamp of last ping sent (for RTT measurement).
+    last_ping_sent: parking_lot::RwLock<Option<Instant>>,
+    /// Timestamp of last inbound message (for connectivity monitoring).
+    last_msg_received: parking_lot::RwLock<Option<Instant>>,
 }
 
 impl GatewayWs {
@@ -98,12 +104,20 @@ impl GatewayWs {
         Self {
             ws_url: GATE_WS_URL,
             ob_tx: None,
+            risk: None,
+            last_ping_sent: parking_lot::RwLock::new(None),
+            last_msg_received: parking_lot::RwLock::new(None),
         }
     }
 
     /// Inject the order book update channel sender.
     pub fn set_ob_tx(&mut self, tx: mpsc::Sender<(String, Vec<Level>, Vec<Level>)>) {
         self.ob_tx = Some(Arc::new(Mutex::new(tx)));
+    }
+
+    /// Inject the risk manager for ping latency monitoring.
+    pub fn set_risk(&mut self, risk: Arc<risk::RiskManager>) {
+        self.risk = Some(risk);
     }
 
     /// Connect and run the WebSocket session.
@@ -128,20 +142,39 @@ impl GatewayWs {
 
         // Ping loop
         let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
+        let risk = self.risk.clone();
 
         loop {
             tokio::select! {
                 _ = ping_interval.tick() => {
+                    // Record ping send time for RTT measurement
+                    if risk.is_some() {
+                        *self.last_ping_sent.write() = Some(Instant::now());
+                    }
                     write.send(Message::Ping(vec![].into())).await?;
                     debug!("Sent ping");
                 }
                 msg = read.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
+                            // Update risk manager latency tracker on any message
+                            if let (Some(ref r), Some(sent)) = (risk.as_ref(), *self.last_ping_sent.read()) {
+                                let latency = sent.elapsed().as_millis() as u64;
+                                r.update_ping_latency(latency);
+                            }
+                            *self.last_msg_received.write() = Some(Instant::now());
                             self.handle_message(&text).await;
                         }
                         Some(Ok(Message::Ping(data))) => {
                             write.send(Message::Pong(data)).await?;
+                        }
+                        Some(Ok(Message::Pong(_))) => {
+                            // RTT: time from ping send to pong receive
+                            if let (Some(ref r), Some(sent)) = (risk.as_ref(), *self.last_ping_sent.read()) {
+                                let rtt_ms = sent.elapsed().as_millis() as u64;
+                                r.update_ping_latency(rtt_ms);
+                                debug!("WS pong RTT: {}ms", rtt_ms);
+                            }
                         }
                         Some(Ok(Message::Close(e))) => {
                             warn!("WS closed: {:?}", e);

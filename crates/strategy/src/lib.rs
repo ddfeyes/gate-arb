@@ -9,11 +9,10 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use engine::Engine;
+use risk::RiskManager;
 use types::{ArbitragePosition, Leg, LegKind, SpreadSignal, TradeState, SCALE};
 
 const LEG2_TIMEOUT_US: u64 = 500_000; // 500ms
-#[allow(dead_code)]
-const MAX_DRAWDOWN_RAW: u64 = 10_000_000_000; // $100 in 1e8 units
 
 pub struct Strategy {
     pub engine: Arc<Engine<20, 20>>,
@@ -25,6 +24,8 @@ pub struct Strategy {
     cumulative_pnl: RwLock<i64>,
     /// Optional DB writer for trade persistence.
     db: Option<DbWriter>,
+    /// Optional risk manager for position safety.
+    risk: Option<Arc<RiskManager>>,
 }
 
 impl Strategy {
@@ -36,12 +37,18 @@ impl Strategy {
             position: RwLock::new(None),
             cumulative_pnl: RwLock::new(0),
             db: None,
+            risk: None,
         }
     }
 
     /// Set the DB writer for trade persistence.
     pub fn set_db(&mut self, db: DbWriter) {
         self.db = Some(db);
+    }
+
+    /// Set the risk manager for position safety checks.
+    pub fn set_risk(&mut self, risk: Arc<RiskManager>) {
+        self.risk = Some(risk);
     }
 
     /// Called every tick from the hot path — check spread, emit signals.
@@ -71,7 +78,20 @@ impl Strategy {
                 }
 
                 if !self.paper_mode {
-                    self.open_position(sig);
+                    // Risk check before opening
+                    let can_open = self
+                        .risk
+                        .as_ref()
+                        .map(|r| r.can_open_position())
+                        .unwrap_or(true);
+                    if !can_open {
+                        info!("risk: blocked new position entry");
+                    } else {
+                        self.open_position(sig);
+                        if let Some(ref risk) = self.risk {
+                            risk.position_opened();
+                        }
+                    }
                 }
             }
         }
@@ -166,6 +186,13 @@ impl Strategy {
 
         // Update cumulative pnl for in-memory tracking
         *self.cumulative_pnl.write() += pnl_usd;
+
+        // Update risk manager
+        if let Some(ref risk) = self.risk {
+            risk.update_pnl(pnl_usd);
+            risk.position_closed();
+        }
+
         info!(
             "TRADE CLOSED: {} pnl={} exit_reason={} total_pnl={}",
             symbol,

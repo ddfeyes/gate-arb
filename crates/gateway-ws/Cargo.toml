@@ -13,3 +13,5 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 types = { path = "../types" }
+risk = { path = "../risk" }
+parking_lot = { workspace = true }

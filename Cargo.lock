@@ -220,6 +220,7 @@ dependencies = [
  "engine",
  "frontend-ws",
  "gateway-ws",
+ "risk",
  "strategy",
  "tokio",
  "tracing",
@@ -232,6 +233,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures-util",
+ "parking_lot",
+ "risk",
  "serde",
  "serde_json",
  "thiserror",
@@ -538,6 +541,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
+name = "risk"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "types",
+]
+
+[[package]]
 name = "rusqlite"
 version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -676,6 +691,7 @@ dependencies = [
  "db",
  "engine",
  "parking_lot",
+ "risk",
  "tracing",
  "types",
 ]

@@ -22,6 +22,12 @@ mod args {
             .and_then(|p| p.parse().ok())
             .unwrap_or(8082)
     }
+    /// Returns true if running in paper mode (default: true).
+    pub fn paper_mode() -> bool {
+        std::env::var("PAPER_MODE")
+            .map(|v| v != "false")
+            .unwrap_or(true)
+    }
 }
 
 #[tokio::main]
@@ -32,11 +38,14 @@ async fn main() -> anyhow::Result<()> {
         .compact()
         .init();
 
+    let paper = args::paper_mode();
     info!("gate-arb starting...");
-    info!(
-        "Paper mode: {}",
-        std::env::var("PAPER_MODE").unwrap_or_else(|_| "true".into())
-    );
+    info!("Paper mode: {}", paper);
+
+    // Initialize risk manager
+    let risk_config = risk::RiskConfig::from_env();
+    let risk = Arc::new(risk::RiskManager::new(risk_config));
+    risk.set_paper_mode(paper);
 
     // Initialize DB writer
     let db_path = args::db_path();
@@ -53,9 +62,10 @@ async fn main() -> anyhow::Result<()> {
     // Build engine
     let engine: Arc<engine::Engine<20, 20>> = Arc::new(engine::Engine::new());
 
-    // Build strategy with DB writer
+    // Build strategy with DB writer and risk manager
     let mut strategy = strategy::Strategy::new(Arc::clone(&engine), 25_000_000_000);
     strategy.set_db(db_writer.clone());
+    strategy.set_risk(Arc::clone(&risk));
 
     // Spawn DB HTTP API server
     let db_for_api = db_writer.clone();
@@ -87,9 +97,10 @@ async fn main() -> anyhow::Result<()> {
         args::PERP_SYMBOL.to_string(),
     );
 
-    // Build gateway and inject OB sender
+    // Build gateway and inject OB sender + risk manager
     let mut gw = gateway_ws::GatewayWs::new();
     gw.set_ob_tx(ob_tx);
+    gw.set_risk(Arc::clone(&risk));
 
     let ws_url = args::GATE_WS_URL;
     info!("Connecting to {}", ws_url);

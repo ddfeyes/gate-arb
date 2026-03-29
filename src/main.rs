@@ -29,8 +29,18 @@ mod args {
     pub fn perp_symbol() -> String {
         env::var("PERP_SYMBOL").unwrap_or_else(|_| "BTC_USDT".into())
     }
-    pub const FRONTEND_PORT: u16 = 8080;
-    pub const HEALTH_PORT: u16 = 8081;
+    pub fn frontend_port() -> u16 {
+        env::var("FRONTEND_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8080)
+    }
+    pub fn health_port() -> u16 {
+        env::var("HEALTH_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8081)
+    }
 }
 
 /// Parse Gate.io order book level from string pair.
@@ -194,7 +204,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // --- Health server setup ---
-    let health = Arc::new(health::HealthHandle::new(args::HEALTH_PORT));
+    let health = Arc::new(health::HealthHandle::new(args::health_port()));
 
     // Startup self-check
     info!("Running startup self-check...");
@@ -229,7 +239,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start frontend WS server
     let fe = Arc::clone(&frontend);
-    let fe_port = args::FRONTEND_PORT;
+    let fe_port = args::frontend_port();
     let health_fe = Arc::clone(&health);
     tokio::spawn(async move {
         if let Err(e) = fe.run(fe_port).await {
@@ -250,7 +260,7 @@ async fn main() -> anyhow::Result<()> {
     });
     info!(
         "Health endpoint on http://0.0.0.0:{}/health",
-        args::HEALTH_PORT
+        args::health_port()
     );
 
     // Run Gate.io WS client

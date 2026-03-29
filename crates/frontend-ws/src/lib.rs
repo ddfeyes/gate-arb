@@ -1,28 +1,39 @@
 //! frontend-ws — WebSocket broadcast to trading dashboard.
 //!
 //! Thread 3 (cold): broadcasts spreads, P&L, positions to frontend.
+//!
+//! Protocol:
+//!   - Browser HTTP GET / → serves the self-contained dashboard HTML
+//!   - Browser WS Upgrade / → stream DashboardState JSON at 500ms interval
+//!   - Non-upgrade TCP connections → HTTP 200 with HTML
+//!
+//! No separate HTTP port is needed.
 
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tracing::{error, info};
 
 const MAX_LOG_ENTRIES: usize = 100;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct PnlUpdate {
-    #[serde(rename = "type")]
-    pub msg_type: &'static str,
-    pub total_trades: u64,
-    pub wins: u64,
-    pub losses: u64,
-    pub pnl_usd: f64,
-    pub pnl_pct: f64,
-    pub last_signal_at: Option<u64>,
+/// Embedded dashboard HTML served at HTTP GET /.
+pub const DASHBOARD_HTML: &str = include_str!("dashboard.html");
+
+/// Returns true if `request_text` contains a WebSocket upgrade header.
+///
+/// RFC 7230 §3.2: header field values are case-insensitive.
+/// Handles "Upgrade: websocket", "Upgrade: WebSocket", etc.
+#[inline]
+pub fn is_ws_upgrade(request_text: &str) -> bool {
+    request_text
+        .to_ascii_lowercase()
+        .contains("upgrade: websocket")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -37,6 +48,10 @@ pub struct DashboardState {
     pub wins: u64,
     pub losses: u64,
     pub position_open: bool,
+    /// Funding rate in integer basis points (e.g. 150 = 1.50% per 8 h).
+    pub funding_rate_bps: i64,
+    /// Unix epoch ms when state was last updated.
+    pub timestamp_ms: u64,
     pub recent_logs: Vec<String>,
 }
 
@@ -59,6 +74,8 @@ impl FrontendWs {
                 wins: 0,
                 losses: 0,
                 position_open: false,
+                funding_rate_bps: 0,
+                timestamp_ms: 0,
                 recent_logs: Vec::new(),
             })),
             logs: Arc::new(RwLock::new(VecDeque::with_capacity(MAX_LOG_ENTRIES))),
@@ -70,6 +87,7 @@ impl FrontendWs {
         s.spread_bps = spread_bps;
         s.bid_price = bid_price;
         s.ask_price = ask_price;
+        s.timestamp_ms = now_ms();
     }
 
     pub fn update_pnl(
@@ -83,18 +101,24 @@ impl FrontendWs {
         let mut s = self.state.write();
         s.pnl_raw = pnl_raw;
         s.pnl_usd = pnl_raw as f64 / 100_000_000.0;
-        // PnL % is relative to a notional base (e.g. 0.01 BTC * $50k ≈ $500)
-        // Use a fixed notional of $500 for display purposes
+        // PnL % relative to $500 notional (0.01 BTC @ $50k)
         const NOTIONAL_USD: f64 = 500.0;
-        s.pnl_pct = if NOTIONAL_USD > 0.0 {
-            (s.pnl_usd / NOTIONAL_USD) * 100.0
-        } else {
-            0.0
-        };
+        s.pnl_pct = (s.pnl_usd / NOTIONAL_USD) * 100.0;
         s.total_trades = total_trades;
         s.wins = wins;
         s.losses = losses;
         s.position_open = position_open;
+        s.timestamp_ms = now_ms();
+    }
+
+    /// Update the latest funding rate.
+    ///
+    /// Unit: integer basis points (1 bps = 0.01%). So `150` means 1.50% per 8 h.
+    /// The dashboard divides by 100 to display as a percentage.
+    pub fn update_funding_rate(&self, funding_rate_bps: i64) {
+        let mut s = self.state.write();
+        s.funding_rate_bps = funding_rate_bps;
+        s.timestamp_ms = now_ms();
     }
 
     pub fn log(&self, msg: String) {
@@ -111,20 +135,22 @@ impl FrontendWs {
         }
     }
 
-    /// Start WS server on given port, broadcast state to all connections.
+    /// Start server on given port.
+    /// - WS connections get a live JSON stream at 500ms intervals.
+    /// - HTTP GET / returns the self-contained dashboard HTML.
     pub async fn run(self: Arc<Self>, port: u16) -> anyhow::Result<()> {
         let addr = format!("0.0.0.0:{}", port);
         let listener = TcpListener::bind(&addr).await?;
         info!("Frontend WS listening on ws://{}", addr);
+        info!("Dashboard available at http://{}/", addr);
 
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
-                    let state = Arc::clone(&self.state);
                     let this = Arc::clone(&self);
                     tokio::spawn(async move {
-                        if let Err(e) = this.handle_client(state, stream).await {
-                            error!("Client error {}: {:?}", addr, e);
+                        if let Err(e) = this.dispatch(stream).await {
+                            error!("Client {} error: {:?}", addr, e);
                         }
                     });
                 }
@@ -133,37 +159,66 @@ impl FrontendWs {
         }
     }
 
-    async fn handle_client(
-        &self,
-        state: Arc<RwLock<DashboardState>>,
-        stream: tokio::net::TcpStream,
-    ) -> anyhow::Result<()> {
+    /// Peek at up to 4 KB of the request to decide HTTP vs WebSocket upgrade.
+    ///
+    /// RFC 7230 §3.2 — header field values are case-insensitive.
+    /// We lowercase the entire peeked buffer before checking for "upgrade: websocket"
+    /// so "Upgrade: WebSocket", "upgrade: websocket", or any mix all route correctly.
+    async fn dispatch(&self, stream: tokio::net::TcpStream) -> anyhow::Result<()> {
+        let mut buf = vec![0u8; 4096];
+        let n = stream.peek(&mut buf).await?;
+
+        // Not enough bytes or not an HTTP request — close silently.
+        if n < 4 || !buf[..n].starts_with(b"GET") {
+            return Ok(());
+        }
+
+        // Case-insensitive check for WebSocket upgrade header (RFC 7230).
+        // Covers: "Upgrade: websocket", "Upgrade: WebSocket", proxy variants, etc.
+        let is_ws = is_ws_upgrade(std::str::from_utf8(&buf[..n]).unwrap_or(""));
+
+        if is_ws {
+            self.handle_ws(stream).await
+        } else {
+            self.handle_http(stream).await
+        }
+    }
+
+    async fn handle_http(&self, mut stream: tokio::net::TcpStream) -> anyhow::Result<()> {
+        // Drain the request
+        let mut buf = vec![0u8; 4096];
+        let _ = stream.read(&mut buf).await?;
+
+        let body = DASHBOARD_HTML.as_bytes();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await?;
+        stream.write_all(body).await?;
+        stream.flush().await?;
+        Ok(())
+    }
+
+    async fn handle_ws(&self, stream: tokio::net::TcpStream) -> anyhow::Result<()> {
         let ws = accept_async(stream).await?;
         let (mut write, _read) = ws.split();
 
-        // Send initial state
-        let snapshot = {
-            let s = state.read();
-            serde_json::to_string(&*s)?
-        };
-        write.send(Message::Text(snapshot.into())).await?;
-
-        // Broadcast updates every 500ms
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    let snapshot = {
-                        let s = state.read();
-                        serde_json::to_string(&*s)?
-                    };
-                    if write.send(Message::Text(snapshot.into())).await.is_err() {
-                        break;
-                    }
-                }
-            }
+        // Send initial full state
+        {
+            let snapshot = serde_json::to_string(&*self.state.read())?;
+            write.send(Message::Text(snapshot.into())).await?;
         }
 
+        // Push updates at 500ms
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
+        loop {
+            interval.tick().await;
+            let snapshot = serde_json::to_string(&*self.state.read())?;
+            if write.send(Message::Text(snapshot.into())).await.is_err() {
+                break;
+            }
+        }
         Ok(())
     }
 }
@@ -172,4 +227,11 @@ impl Default for FrontendWs {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }

@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>gate-arb</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#080812;--surface:#0e0e1a;--surface2:#14142a;
+  --border:#1e1e38;--text:#cdd6f4;--muted:#6c7086;
+  --green:#a6e3a1;--red:#f38ba8;--yellow:#f9e2af;
+  --blue:#89b4fa;--teal:#94e2d5;
+  font-family:'JetBrains Mono','Fira Code','Courier New',monospace;
+}
+body{background:var(--bg);color:var(--text);min-height:100vh;font-size:13px;display:flex;flex-direction:column}
+
+/* ── Header ── */
+header{display:flex;align-items:center;gap:14px;padding:10px 16px;background:var(--surface);border-bottom:1px solid var(--border)}
+.logo{font-size:15px;font-weight:700;color:var(--blue);letter-spacing:.06em}
+.badge{padding:2px 8px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:.08em}
+.badge-paper{background:#f9e2af18;color:var(--yellow);border:1px solid #f9e2af44}
+.badge-live{background:#f38ba818;color:var(--red);border:1px solid #f38ba844}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 5px var(--green);animation:pulse 2s infinite}
+.dot.off{background:var(--red);box-shadow:0 0 5px var(--red);animation:none}
+#slabel{color:var(--muted);font-size:11px}
+.spacer{flex:1}
+#clock{color:var(--muted);font-size:11px}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ── Metrics ── */
+.metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:var(--border);border-bottom:1px solid var(--border)}
+.metric{background:var(--surface);padding:12px 16px}
+.mlabel{font-size:10px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px}
+.mvalue{font-size:19px;font-weight:700;transition:color .25s}
+.msub{font-size:11px;color:var(--muted);margin-top:2px}
+.g{color:var(--green)!important}.r{color:var(--red)!important}.y{color:var(--yellow)!important}
+
+/* ── Main ── */
+.main{display:grid;grid-template-columns:2fr 1fr;flex:1;gap:1px;background:var(--border);min-height:260px}
+.panel{background:var(--surface);display:flex;flex-direction:column;padding:16px;gap:8px;overflow:hidden}
+.ptitle{font-size:10px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;display:flex;justify-content:space-between}
+#chart{width:100%;height:220px;display:block}
+#logbox{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:3px}
+#logbox::-webkit-scrollbar{width:3px}
+#logbox::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.le{font-size:11px;color:var(--muted);padding:2px 0;border-bottom:1px solid #1a1a2e33;line-height:1.5}
+.le-open{color:var(--green)}.le-close{color:var(--teal)}.le-err{color:var(--red)}.le-warn{color:var(--yellow)}
+
+/* ── Footer ── */
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:var(--border);border-top:1px solid var(--border)}
+.stat{background:var(--surface2);padding:10px 16px}
+.slabel{font-size:10px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;margin-bottom:3px}
+.svalue{font-size:16px;font-weight:700}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">gate-arb</div>
+  <div class="badge badge-paper" id="modebadge">PAPER</div>
+  <div class="dot off" id="dot"></div>
+  <span id="slabel">CONNECTING</span>
+  <div class="spacer"></div>
+  <span id="clock">--:--:-- UTC</span>
+</header>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="mlabel">Spread</div>
+    <div class="mvalue" id="spread">—</div>
+    <div class="msub" id="spread-sub">bps</div>
+  </div>
+  <div class="metric">
+    <div class="mlabel">Spot Bid</div>
+    <div class="mvalue" id="bid">—</div>
+    <div class="msub">USDT</div>
+  </div>
+  <div class="metric">
+    <div class="mlabel">Perp Ask</div>
+    <div class="mvalue" id="ask">—</div>
+    <div class="msub">USDT</div>
+  </div>
+  <div class="metric">
+    <div class="mlabel">Funding</div>
+    <div class="mvalue" id="funding">—</div>
+    <div class="msub">per 8h</div>
+  </div>
+  <div class="metric">
+    <div class="mlabel">Position</div>
+    <div class="mvalue" id="position">IDLE</div>
+    <div class="msub" id="pos-sub">paper mode</div>
+  </div>
+</div>
+
+<div class="main">
+  <div class="panel">
+    <div class="ptitle"><span>P&amp;L Curve (USD)</span><span id="pnl-label">$0.0000</span></div>
+    <canvas id="chart"></canvas>
+  </div>
+  <div class="panel">
+    <div class="ptitle"><span>Execution Log</span></div>
+    <div id="logbox"></div>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="slabel">Trades</div><div class="svalue" id="n-trades">0</div></div>
+  <div class="stat"><div class="slabel">Wins</div><div class="svalue g" id="n-wins">0</div></div>
+  <div class="stat"><div class="slabel">Losses</div><div class="svalue r" id="n-losses">0</div></div>
+  <div class="stat"><div class="slabel">Win Rate</div><div class="svalue" id="win-rate">—</div></div>
+  <div class="stat"><div class="slabel">Total P&amp;L</div><div class="svalue" id="total-pnl">$0.00</div></div>
+</div>
+
+<script>
+const PNL_HIST=[];const MAX_H=300;const seenLogs=new Set();
+let reconnDelay=1000;
+
+// Clock
+function tick(){const n=new Date();const p=x=>String(x).padStart(2,'0');document.getElementById('clock').textContent=`${p(n.getUTCHours())}:${p(n.getUTCMinutes())}:${p(n.getUTCSeconds())} UTC`;}
+setInterval(tick,1000);tick();
+
+// WS
+const WS_URL='ws://'+location.host;
+function connect(){
+  const ws=new WebSocket(WS_URL);
+  ws.onopen=()=>{document.getElementById('dot').classList.remove('off');document.getElementById('slabel').textContent='LIVE';reconnDelay=1000;};
+  ws.onclose=()=>{document.getElementById('dot').classList.add('off');document.getElementById('slabel').textContent='RECONNECTING';setTimeout(connect,reconnDelay);reconnDelay=Math.min(reconnDelay*2,30000);};
+  ws.onerror=()=>ws.close();
+  ws.onmessage=e=>{try{onState(JSON.parse(e.data));}catch(_){}};
+}
+
+function fmt(v,d=2){return Number(v||0).toFixed(d);}
+
+function onState(s){
+  // Spread
+  const bps=s.spread_bps||0;
+  const sp=document.getElementById('spread');
+  sp.textContent=fmt(bps,1);
+  sp.className='mvalue '+(bps>50?'g':bps>20?'y':'r');
+
+  // Prices
+  document.getElementById('bid').textContent=fmt(s.bid_price,2);
+  document.getElementById('ask').textContent=fmt(s.ask_price,2);
+
+  // Funding
+  const fr=s.funding_rate_bps||0;
+  const fe=document.getElementById('funding');
+  fe.textContent=fmt(fr/100,4)+'%';
+  fe.className='mvalue '+(fr>0?'g':fr<0?'r':'');
+
+  // Position
+  const pe=document.getElementById('position');
+  pe.textContent=s.position_open?'● OPEN':'IDLE';
+  pe.className='mvalue '+(s.position_open?'g':'');
+
+  // PnL
+  const pu=s.pnl_usd||0;
+  document.getElementById('pnl-label').textContent=(pu>=0?'+':'')+'$'+fmt(pu,4);
+  const tpe=document.getElementById('total-pnl');
+  tpe.textContent=(pu>=0?'+':'')+'$'+fmt(Math.abs(pu),2);
+  tpe.className='svalue '+(pu>=0?'g':'r');
+
+  // Stats
+  document.getElementById('n-trades').textContent=s.total_trades||0;
+  document.getElementById('n-wins').textContent=s.wins||0;
+  document.getElementById('n-losses').textContent=s.losses||0;
+  const t=s.total_trades||0;const wr=t>0?(s.wins/t*100):0;
+  const wre=document.getElementById('win-rate');
+  wre.textContent=t>0?fmt(wr,1)+'%':'—';
+  wre.className='svalue '+(t>0?(wr>=50?'g':'r'):'');
+
+  // PnL history
+  PNL_HIST.push({t:Date.now(),v:pu});
+  if(PNL_HIST.length>MAX_H)PNL_HIST.shift();
+  drawChart();
+
+  // Logs
+  if(s.recent_logs&&s.recent_logs.length)appendLogs(s.recent_logs);
+}
+
+function appendLogs(logs){
+  const box=document.getElementById('logbox');let added=false;
+  for(const msg of logs){
+    if(seenLogs.has(msg))continue;
+    seenLogs.add(msg);
+    if(seenLogs.size>500){const k=seenLogs.values().next().value;seenLogs.delete(k);}
+    const el=document.createElement('div');
+    const lc=msg.toLowerCase();
+    let cls='le';
+    if(lc.includes('open')||lc.includes('entry')||lc.includes('buy'))cls+=' le-open';
+    else if(lc.includes('close')||lc.includes('exit')||lc.includes('pnl'))cls+=' le-close';
+    else if(lc.includes('error')||lc.includes('fail'))cls+=' le-err';
+    else if(lc.includes('warn')||lc.includes('timeout'))cls+=' le-warn';
+    el.className=cls;el.textContent=msg;
+    box.appendChild(el);added=true;
+  }
+  if(added)box.scrollTop=box.scrollHeight;
+}
+
+function drawChart(){
+  const canvas=document.getElementById('chart');
+  const dpr=window.devicePixelRatio||1;
+  const W=canvas.parentElement.getBoundingClientRect().width-32;
+  const H=220;
+  if(canvas.width!==Math.round(W*dpr)){
+    canvas.width=Math.round(W*dpr);canvas.height=H*dpr;
+    canvas.style.width=W+'px';canvas.style.height=H+'px';
+  }
+  const ctx=canvas.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,W,H);
+  const pad=18;
+
+  if(PNL_HIST.length<2){
+    ctx.strokeStyle='#1e1e38';ctx.lineWidth=1;ctx.setLineDash([4,4]);
+    ctx.beginPath();ctx.moveTo(pad,H/2);ctx.lineTo(W-pad,H/2);ctx.stroke();
+    ctx.setLineDash([]);return;
+  }
+
+  const vals=PNL_HIST.map(p=>p.v);
+  const mn=Math.min(...vals,0),mx=Math.max(...vals,0);
+  const rng=mx-mn||0.0001;
+  const xOf=i=>pad+(i/(PNL_HIST.length-1))*(W-2*pad);
+  const yOf=v=>pad+(1-(v-mn)/rng)*(H-2*pad);
+  const z=yOf(0);
+
+  // Grid lines
+  ctx.strokeStyle='#191928';ctx.lineWidth=1;ctx.setLineDash([3,6]);
+  for(let i=0;i<=4;i++){const y=pad+(i/4)*(H-2*pad);ctx.beginPath();ctx.moveTo(pad,y);ctx.lineTo(W-pad,y);ctx.stroke();}
+  ctx.setLineDash([]);
+
+  // Zero line
+  ctx.strokeStyle='#28284a';ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(pad,z);ctx.lineTo(W-pad,z);ctx.stroke();
+
+  const last=vals[vals.length-1];
+  const pos=last>=0;
+  const lc=pos?'#a6e3a1':'#f38ba8';
+
+  // Fill
+  const grad=ctx.createLinearGradient(0,pad,0,H-pad);
+  grad.addColorStop(0,pos?'#a6e3a140':'#f38ba840');grad.addColorStop(1,'transparent');
+  ctx.beginPath();
+  ctx.moveTo(xOf(0),z);
+  for(let i=0;i<PNL_HIST.length;i++)ctx.lineTo(xOf(i),yOf(vals[i]));
+  ctx.lineTo(xOf(PNL_HIST.length-1),z);
+  ctx.closePath();ctx.fillStyle=grad;ctx.fill();
+
+  // Line
+  ctx.beginPath();ctx.moveTo(xOf(0),yOf(vals[0]));
+  for(let i=1;i<PNL_HIST.length;i++)ctx.lineTo(xOf(i),yOf(vals[i]));
+  ctx.strokeStyle=lc;ctx.lineWidth=1.5;ctx.lineJoin='round';ctx.stroke();
+
+  // Dot at current value
+  const lx=xOf(PNL_HIST.length-1),ly=yOf(last);
+  ctx.beginPath();ctx.arc(lx,ly,3.5,0,Math.PI*2);ctx.fillStyle=lc;ctx.fill();
+
+  // Y-axis labels
+  ctx.fillStyle='#6c7086';ctx.font='10px monospace';ctx.textAlign='right';
+  ctx.fillText('$'+mx.toFixed(2),pad-3,pad+8);
+  ctx.fillText('$'+mn.toFixed(2),pad-3,H-pad);
+  if(mn<0&&mx>0){ctx.fillStyle='#3a3a5a';ctx.fillText('$0',pad-3,z+4);}
+}
+
+const ro=new ResizeObserver(()=>{if(PNL_HIST.length>0)drawChart();});
+ro.observe(document.querySelector('.panel'));
+connect();
+</script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+services:
+  gate-arb:
+    image: ghcr.io/ddfeyes/gate-arb:latest
+    container_name: gate-arb
+    restart: unless-stopped
+    ports:
+      - "8081:8081" # health endpoint
+      # Frontend WS — optional, uncomment for local dashboard access
+      # - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      # Trading
+      SPOT_SYMBOL: ${SPOT_SYMBOL:-BTC_USDT}
+      PERP_SYMBOL: ${PERP_SYMBOL:-BTC_USDT}
+      ENTRY_SPREAD_PCT: ${ENTRY_SPREAD_PCT:-0.05}
+      MAX_POSITION_USD: ${MAX_POSITION_USD:-1000}
+      # Gate.io API (for live trading — leave empty for paper mode)
+      GATE_API_KEY: ${GATE_API_KEY:-}
+      GATE_SECRET: ${GATE_SECRET:-}
+      # Mode
+      PAPER_MODE: ${PAPER_MODE:-true}
+      # Endpoints
+      GATE_WS_URL: ${GATE_WS_URL:-wss://api.gateio.ws/ws/v4/}
+      FRONTEND_PORT: "8080"
+      HEALTH_PORT: "8081"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          # HFT hot path — no memory bloat
+          memory: 256M
+
+  # nginx reverse-proxy for https://gate-arb.111miniapp.com/
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: gate-arb-nginx
+    restart: unless-stopped
+    ports:
+      - "80:8080"
+      - "443:8443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      gate-arb:
+        condition: service_healthy
+    profiles:
+      - production  # activate with: docker compose --profile production up

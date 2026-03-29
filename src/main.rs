@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Build engine
-    let engine = Arc::new(engine::Engine::<20, 20>::new());
+    let engine: Arc<engine::Engine<20, 20>> = Arc::new(engine::Engine::new());
     // threshold_spread_raw is an ABSOLUTE spread in Fixed64 raw units (1e8 = 1 USDT).
     // 50bps on BTC ~50k = $250 = 25_000_000_000 raw.
     // In paper mode this is just a signal threshold — no real orders.
@@ -48,8 +48,20 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Connect to Gate.io and run hot path
+    // Create OB update channel: gateway → engine
+    let (ob_tx, ob_rx) = tokio::sync::mpsc::channel(1000);
+
+    // Spawn engine OB receiver
+    engine.spawn_ob_receiver(
+        ob_rx,
+        args::SPOT_SYMBOL.to_string(),
+        args::PERP_SYMBOL.to_string(),
+    );
+
+    // Build gateway and inject OB sender
     let gw = gateway_ws::GatewayWs::new();
+    gw.set_ob_tx(ob_tx);
+
     let ws_url = args::GATE_WS_URL;
     info!("Connecting to {}", ws_url);
     gw.run(args::SPOT_SYMBOL, args::PERP_SYMBOL).await?;

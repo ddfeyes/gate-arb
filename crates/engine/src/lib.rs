@@ -5,9 +5,10 @@
 use parking_lot::RwLock;
 use std::sync::Arc;
 #[allow(unused_imports)]
-use tracing::info;
+use tracing::{debug, info};
+use types::{Fixed64, Level, ObUpdateChannel, OrderBook, SpreadSignal, SCALE};
 
-use types::{Fixed64, OrderBook, SpreadSignal, SCALE};
+use gateway_ws::parse_level;
 
 /// Hot engine state — lock-free read path.
 pub struct Engine<const B: usize, const A: usize> {
@@ -21,6 +22,64 @@ impl<const B: usize, const A: usize> Engine<B, A> {
             spot_book: Arc::new(RwLock::new(OrderBook::new())),
             perp_book: Arc::new(RwLock::new(OrderBook::new())),
         }
+    }
+
+    /// Spawn a tokio task that receives OB updates from the gateway channel
+    /// and applies them to the appropriate order book (spot or perp).
+    ///
+    /// `spot_symbol` and `perp_symbol` are used to route updates to the right book.
+    /// The task runs until the receiver is dropped.
+    pub fn spawn_ob_receiver(
+        self: &Arc<Self>,
+        mut rx: tokio::sync::mpsc::Receiver<ObUpdateChannel>,
+        spot_symbol: String,
+        perp_symbol: String,
+    ) {
+        let engine = Arc::clone(self);
+        tokio::spawn(async move {
+            while let Some(update) = rx.recv().await {
+                let is_spot = update.symbol == spot_symbol;
+                let is_perp = update.symbol == perp_symbol;
+
+                if !is_spot && !is_perp {
+                    continue;
+                }
+
+                // Parse bid levels
+                let mut bid_levels = [Level {
+                    price: Fixed64::zero(),
+                    qty: 0,
+                }; B];
+                let bid_count = update.bids.len().min(B);
+                for (i, ob_level) in update.bids.iter().take(B).enumerate() {
+                    bid_levels[i] = parse_level(&ob_level.price, &ob_level.qty);
+                }
+
+                // Parse ask levels
+                let mut ask_levels = [Level {
+                    price: Fixed64::zero(),
+                    qty: 0,
+                }; A];
+                let ask_count = update.asks.len().min(A);
+                for (i, ob_level) in update.asks.iter().take(A).enumerate() {
+                    ask_levels[i] = parse_level(&ob_level.price, &ob_level.qty);
+                }
+
+                let book = if is_spot {
+                    &engine.spot_book
+                } else {
+                    &engine.perp_book
+                };
+
+                let mut guard = book.write();
+                guard.update_bids(&bid_levels[..bid_count]);
+                guard.update_asks(&ask_levels[..ask_count]);
+                debug!(
+                    "OB updated: {} bids={} asks={}",
+                    update.symbol, bid_count, ask_count
+                );
+            }
+        });
     }
 
     /// Check spread between spot and perp — called from hot path.

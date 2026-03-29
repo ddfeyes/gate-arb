@@ -6,11 +6,13 @@
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
-use types::{Fixed64, Level};
+use types::{Fixed64, Level, ObLevel, ObUpdateChannel};
 
 const GATE_WS_URL: &str = "wss://api.gateio.ws/ws/v4/";
 
@@ -85,15 +87,91 @@ struct ObSnapshot {
     asks: Vec<Vec<String>>,
 }
 
+// ─── Reconnection ───────────────────────────────────────────────────────────
+
+/// Reconnection configuration with exponential backoff + jitter.
+#[derive(Debug, Clone)]
+pub struct ReconnectConfig {
+    /// Initial delay in seconds.
+    pub base_delay_secs: f64,
+    /// Maximum delay in seconds.
+    pub max_delay_secs: f64,
+    /// Jitter factor [0.0, 1.0) applied to delay.
+    pub jitter: f64,
+}
+
+impl Default for ReconnectConfig {
+    fn default() -> Self {
+        Self {
+            base_delay_secs: 1.0,
+            max_delay_secs: 30.0,
+            jitter: 0.3,
+        }
+    }
+}
+
+/// Jittered exponential backoff. call site holds no locks.
+fn backoff_duration(attempt: u32, config: &ReconnectConfig) -> std::time::Duration {
+    let exp_delay = config.base_delay_secs * 2f64.powi(attempt as i32);
+    let capped = exp_delay.min(config.max_delay_secs);
+    let jitter_range = capped * config.jitter;
+    let jitter = (jitter_range * fastrand::f64()).min(jitter_range);
+    std::time::Duration::from_secs_f64(capped + jitter)
+}
+
+// ─── GatewayWs ───────────────────────────────────────────────────────────────
+
 /// Connected session state.
 pub struct GatewayWs {
     ws_url: &'static str,
+    /// Optional OB update sender — set via `set_ob_tx()` before `run()`.
+    ob_tx: Arc<std::sync::Mutex<Option<mpsc::Sender<ObUpdateChannel>>>>,
 }
 
 impl GatewayWs {
     pub fn new() -> Self {
         Self {
             ws_url: GATE_WS_URL,
+            ob_tx: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Inject the OB update channel sender. Call before `run()`.
+    pub fn set_ob_tx(&self, tx: mpsc::Sender<ObUpdateChannel>) {
+        let mut guard = self.ob_tx.lock().unwrap();
+        *guard = Some(tx);
+    }
+
+    /// Connect and run the WebSocket session with automatic reconnection.
+    /// Runs indefinitely, reconnecting with exponential backoff on disconnect.
+    pub async fn run_with_reconnect(
+        &self,
+        spot_symbol: &str,
+        perp_symbol: &str,
+        config: ReconnectConfig,
+    ) -> Result<()> {
+        let mut attempt = 0u32;
+        loop {
+            match self.run(spot_symbol, perp_symbol).await {
+                Ok(()) => {
+                    info!("WS session ended cleanly, reconnecting...");
+                }
+                Err(e) => {
+                    error!("WS session error: {:?}", e);
+                }
+            }
+
+            if attempt == 0 {
+                attempt = 1; // first backoff uses attempt=1 so it's 2x base
+            }
+            let delay = backoff_duration(attempt, &config);
+            info!(
+                "Reconnecting in {:.2}s (attempt {})",
+                delay.as_secs_f64(),
+                attempt + 1
+            );
+            tokio::time::sleep(delay).await;
+            attempt = attempt.saturating_add(1);
         }
     }
 
@@ -179,7 +257,19 @@ impl GatewayWs {
             update.bids.len(),
             update.asks.len()
         );
-        // Real processing happens in engine — gateway just receives and logs
+
+        // Forward to engine via channel if configured.
+        let ob_tx = self.ob_tx.lock().unwrap();
+        if let Some(ref tx) = *ob_tx {
+            let update = ObUpdateChannel {
+                symbol: update.s.clone(),
+                bids: update.bids.into_iter().map(|(p, q)| ObLevel { price: p, qty: q }).collect(),
+                asks: update.asks.into_iter().map(|(p, q)| ObLevel { price: p, qty: q }).collect(),
+                t: update.t,
+            };
+            // Non-blocking send — drop if channel is full (hot path must not block).
+            let _ = tx.try_send(update);
+        }
     }
 
     /// Parse a price string to Fixed64 without allocating.

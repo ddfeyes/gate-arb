@@ -253,7 +253,7 @@ impl Db {
     /// P&L summary stats.
     pub fn get_stats(&self) -> StatsJson {
         let conn = self.conn.lock();
-        let count: i64 = conn
+        let _count: i64 = conn
             .query_row("SELECT COUNT(*) FROM trades", [], |r| r.get(0))
             .unwrap();
 
@@ -281,7 +281,7 @@ impl Db {
                     total, total_pnl, wins, avg_dur
                 );
                 let win_rate = if total > 0 {
-                    (wins as f64 / total as f64 * 100.0).round() as f64
+                    (wins as f64 / total as f64 * 100.0).round()
                 } else {
                     0.0
                 };
@@ -289,7 +289,7 @@ impl Db {
                     total_trades: total,
                     total_pnl_usd: total_pnl,
                     win_rate,
-                    avg_trade_duration_secs: (avg_dur as f64 / 1_000_000.0).round(),
+                    avg_trade_duration_secs: (avg_dur / 1_000_000.0).round(),
                 }
             }
             Err(e) => {

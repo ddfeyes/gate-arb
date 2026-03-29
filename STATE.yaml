@@ -1,0 +1,8 @@
+state: PLANNING
+current_issue: 13
+current_pr: null
+blocked_since: null
+blocked_reason: null
+last_wake: "2026-03-28T22:25:00Z"
+last_action: "Picked issue #13 (reconnection logic with exponential backoff). Branch feat/issue-13 created."
+next_issue_notes: "Gateway-ws disconnects without reconnecting. Need exponential backoff + jitter. Also: gateway→engine data flow is broken (process_ob_update logs but doesn't update engine books)."

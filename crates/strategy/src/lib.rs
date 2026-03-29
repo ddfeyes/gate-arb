@@ -7,6 +7,7 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use tracing::{info, warn};
 
+use db::{Db, SpreadRecord, TradeRecord};
 use engine::Engine;
 use types::{ArbitragePosition, Leg, LegKind, SpreadSignal, TradeState};
 
@@ -22,17 +23,28 @@ pub struct Strategy {
     position: RwLock<Option<ArbitragePosition>>,
     /// Cumulative P&L in raw units.
     cumulative_pnl: RwLock<i64>,
+    /// Optional DB for persistence (can be None in tests).
+    pub db: Option<Arc<Db>>,
+    pub symbol: &'static str,
 }
 
 impl Strategy {
-    pub fn new(engine: Arc<Engine<20, 20>>, threshold_spread_bps: u64) -> Self {
+    pub fn new(engine: Arc<Engine<20, 20>>, threshold_spread_raw: u64) -> Self {
         Self {
             engine,
             paper_mode: true,
-            threshold_spread_raw: threshold_spread_bps,
+            threshold_spread_raw,
             position: RwLock::new(None),
             cumulative_pnl: RwLock::new(0),
+            db: None,
+            symbol: "BTC_USDT",
         }
+    }
+
+    /// Set the DB handle (called after construction).
+    pub fn with_db(mut self, db: Arc<Db>) -> Self {
+        self.db = Some(db);
+        self
     }
 
     /// Called every tick from the hot path — check spread, emit signals.
@@ -41,6 +53,20 @@ impl Strategy {
         let signal = self.engine.check_spread(self.threshold_spread_raw);
 
         if let Some(sig) = signal {
+            // Log spread to DB (hot path — uses lock-free ring, zero blocking)
+            if let Some(ref db) = self.db {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_micros() as i64;
+                db.push_spread(SpreadRecord {
+                    ts: now,
+                    spread_raw: sig.spread_raw as i64,
+                    spread_pct_raw: sig.spread_pct.raw() as i64,
+                    symbol: self.symbol,
+                });
+            }
+
             if self.position.read().is_none() {
                 info!(
                     "SPREAD SIGNAL: raw={} pct={} bid={} ask={}",
@@ -54,6 +80,14 @@ impl Strategy {
 
         // Check position timeouts
         self.check_timeouts();
+    }
+
+    /// Log a closed trade to SQLite via the DB ring buffer.
+    #[inline(always)]
+    pub fn log_trade(&self, record: TradeRecord) {
+        if let Some(ref db) = self.db {
+            db.push_trade(record);
+        }
     }
 
     fn open_position(&self, sig: SpreadSignal) {

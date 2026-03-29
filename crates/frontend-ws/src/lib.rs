@@ -1,15 +1,19 @@
-//! frontend-ws — WebSocket broadcast to trading dashboard.
+//! frontend-ws — WebSocket broadcast to trading dashboard + HTTP API.
 //!
 //! Thread 3 (cold): broadcasts spreads, P&L, positions to frontend.
+//! HTTP API on port +1 (8081): GET /api/trades, GET /api/stats
 
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tracing::{error, info};
+
+use db::Db;
 
 const MAX_LOG_ENTRIES: usize = 100;
 
@@ -26,6 +30,7 @@ pub struct DashboardState {
 pub struct FrontendWs {
     pub state: Arc<RwLock<DashboardState>>,
     pub logs: Arc<RwLock<VecDeque<String>>>,
+    pub db: Option<Arc<Db>>,
 }
 
 impl FrontendWs {
@@ -40,7 +45,13 @@ impl FrontendWs {
                 recent_logs: Vec::new(),
             })),
             logs: Arc::new(RwLock::new(VecDeque::with_capacity(MAX_LOG_ENTRIES))),
+            db: None,
         }
+    }
+
+    pub fn with_db(mut self, db: Arc<Db>) -> Self {
+        self.db = Some(db);
+        self
     }
 
     pub fn update(&self, spread_bps: f64, bid_price: f64, ask_price: f64) {
@@ -64,8 +75,34 @@ impl FrontendWs {
         }
     }
 
-    /// Start WS server on given port, broadcast state to all connections.
+    /// Start WS + HTTP servers.
     pub async fn run(self: Arc<Self>, port: u16) -> anyhow::Result<()> {
+        let ws_port = port;
+        let api_port = port + 1;
+
+        // WS server
+        let ws_self = Arc::clone(&self);
+        tokio::spawn(async move {
+            if let Err(e) = ws_self.run_ws(ws_port).await {
+                tracing::error!("Frontend WS error: {:?}", e);
+            }
+        });
+
+        // HTTP API server
+        let api_self = Arc::clone(&self);
+        tokio::spawn(async move {
+            if let Err(e) = api_self.run_api(api_port).await {
+                tracing::error!("HTTP API error: {:?}", e);
+            }
+        });
+
+        info!("Frontend servers: WS={}, HTTP API={}", ws_port, api_port);
+        // Keep-alive
+        tokio::signal::ctrl_c().await.ok();
+        Ok(())
+    }
+
+    async fn run_ws(self: Arc<Self>, port: u16) -> anyhow::Result<()> {
         let addr = format!("0.0.0.0:{}", port);
         let listener = TcpListener::bind(&addr).await?;
         info!("Frontend WS listening on ws://{}", addr);
@@ -119,6 +156,85 @@ impl FrontendWs {
 
         Ok(())
     }
+
+    /// Minimal HTTP API server — GET /api/trades, GET /api/stats.
+    async fn run_api(self: Arc<Self>, port: u16) -> anyhow::Result<()> {
+        let addr = format!("0.0.0.0:{}", port);
+        let listener = TcpListener::bind(&addr).await?;
+        info!("HTTP API listening on http://{}", addr);
+
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let this = Arc::clone(&self);
+                    tokio::spawn(async move {
+                        if let Err(e) = this.handle_http(stream).await {
+                            tracing::debug!("HTTP error: {:?}", e);
+                        }
+                    });
+                }
+                Err(e) => error!("HTTP accept error: {:?}", e),
+            }
+        }
+    }
+
+    async fn handle_http(&self, mut stream: TcpStream) -> anyhow::Result<()> {
+        let mut buf = [0u8; 1024];
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(());
+        }
+
+        let request = std::str::from_utf8(&buf[..n])?;
+        let first_line = request.lines().next().unwrap_or("");
+        let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+
+        let response = match path {
+            "/api/trades" => {
+                let trades = self
+                    .db
+                    .as_ref()
+                    .map(|db| db.get_recent_trades(50))
+                    .unwrap_or_default();
+                let body = serde_json::to_string(&trades).unwrap_or_else(|_| "[]".into());
+                http_200("application/json", &body)
+            }
+            "/api/stats" => {
+                let stats = self
+                    .db
+                    .as_ref()
+                    .map(|db| db.get_stats())
+                    .unwrap_or_default();
+                let body = serde_json::to_string(&stats).unwrap_or_else(|_| "{}".into());
+                http_200("application/json", &body)
+            }
+            "/health" => http_200("text/plain", "ok"),
+            _ => http_404(),
+        };
+
+        stream.write_all(response.as_bytes()).await?;
+        stream.flush().await?;
+        Ok(())
+    }
+}
+
+fn http_200(content_type: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: {}\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         Access-Control-Allow-Origin: *\r\n\
+         \r\n\
+         {}",
+        content_type,
+        body.len(),
+        body
+    )
+}
+
+fn http_404() -> String {
+    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
 }
 
 impl Default for FrontendWs {

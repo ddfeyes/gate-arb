@@ -34,6 +34,10 @@ pub struct HealthState {
     pub startup_error: Option<String>,
     /// When the process started.
     pub start_time: Instant,
+    /// Consecutive reconnect attempts since last successful connect.
+    pub ws_reconnect_attempt: u32,
+    /// Whether engine order placement is paused due to WS being down >60s.
+    pub order_pause: bool,
 }
 
 impl Default for HealthState {
@@ -45,6 +49,8 @@ impl Default for HealthState {
             startup_ok: false,
             startup_error: None,
             start_time: Instant::now(),
+            ws_reconnect_attempt: 0,
+            order_pause: false,
         }
     }
 }
@@ -83,6 +89,9 @@ pub struct HealthResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub startup_error: Option<String>,
     pub uptime_s: u64,
+    pub ws_reconnect_attempt: u32,
+    pub ws_connected: bool,
+    pub order_pause: bool,
 }
 
 impl HealthState {
@@ -111,6 +120,9 @@ impl HealthState {
             startup_ok: self.startup_ok,
             startup_error: self.startup_error.clone(),
             uptime_s: self.start_time.elapsed().as_secs(),
+            ws_reconnect_attempt: self.ws_reconnect_attempt,
+            ws_connected: self.gate_ws == GateWsStatus::Connected,
+            order_pause: self.order_pause,
         }
     }
 }
@@ -180,6 +192,23 @@ impl HealthHandle {
     /// Update engine status.
     pub async fn set_engine(&self, status: EngineStatus) {
         self.state.write().await.engine = status;
+    }
+
+    /// Record a reconnect attempt.
+    pub async fn set_reconnect_attempt(&self, attempt: u32) {
+        self.state.write().await.ws_reconnect_attempt = attempt;
+    }
+
+    /// Reset reconnect counter after successful connect.
+    pub async fn reset_reconnect(&self) {
+        let mut s = self.state.write().await;
+        s.ws_reconnect_attempt = 0;
+        s.order_pause = false;
+    }
+
+    /// Set order placement pause flag.
+    pub async fn set_order_pause(&self, paused: bool) {
+        self.state.write().await.order_pause = paused;
     }
 
     /// Start the HTTP health server. Runs forever.
@@ -253,5 +282,55 @@ mod tests {
         s.gate_ws = GateWsStatus::Disconnected;
         s.frontend_ws = FrontendStatus::Running;
         assert_eq!(s.overall_status(), "degraded");
+    }
+
+    #[tokio::test]
+    async fn test_reconnect_fields_default() {
+        let handle = HealthHandle::new(0);
+        let s = handle.state.read().await;
+        assert_eq!(s.ws_reconnect_attempt, 0);
+        assert!(!s.order_pause);
+    }
+
+    #[tokio::test]
+    async fn test_reconnect_attempt_set_and_reset() {
+        let handle = HealthHandle::new(0);
+        handle.set_reconnect_attempt(3).await;
+        {
+            let s = handle.state.read().await;
+            assert_eq!(s.ws_reconnect_attempt, 3);
+        }
+        handle.reset_reconnect().await;
+        {
+            let s = handle.state.read().await;
+            assert_eq!(s.ws_reconnect_attempt, 0);
+            assert!(!s.order_pause);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_order_pause_set() {
+        let handle = HealthHandle::new(0);
+        handle.set_order_pause(true).await;
+        assert!(handle.state.read().await.order_pause);
+        handle.set_order_pause(false).await;
+        assert!(!handle.state.read().await.order_pause);
+    }
+
+    #[tokio::test]
+    async fn test_health_response_ws_connected_field() {
+        let mut s = HealthState::default();
+        s.startup_ok = true;
+        s.gate_ws = GateWsStatus::Connected;
+        s.frontend_ws = FrontendStatus::Running;
+        let resp = s.to_response();
+        assert!(resp.ws_connected);
+
+        let mut s2 = HealthState::default();
+        s2.startup_ok = true;
+        s2.gate_ws = GateWsStatus::Disconnected;
+        s2.frontend_ws = FrontendStatus::Running;
+        let resp2 = s2.to_response();
+        assert!(!resp2.ws_connected);
     }
 }

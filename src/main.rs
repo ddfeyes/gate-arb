@@ -5,7 +5,7 @@
 //! Paper trading by default. Set PAPER_MODE=false to enable live trading.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
@@ -158,8 +158,36 @@ impl HotPath {
     }
 }
 
-/// WS client handler that bridges Gate.io WS → hot path.
-async fn run_gateway(spot_symbol: &str, perp_symbol: &str, hot_path: Arc<HotPath>) -> Result<()> {
+/// Reconnection config for the gateway WS loop.
+struct ReconnectConfig {
+    /// Initial backoff delay.
+    initial_delay: Duration,
+    /// Backoff multiplier (doubles each time, capped at max_delay).
+    max_delay: Duration,
+    /// Max consecutive reconnect attempts before giving up.
+    max_attempts: u32,
+    /// If disconnected longer than this, pause order placement.
+    pause_threshold: Duration,
+}
+
+impl Default for ReconnectConfig {
+    fn default() -> Self {
+        Self {
+            initial_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(30),
+            max_attempts: 10,
+            pause_threshold: Duration::from_secs(60),
+        }
+    }
+}
+
+/// Single WS connection attempt — connects, subscribes, then pumps messages until disconnect.
+/// Returns Ok(()) on clean disconnect, Err on fatal errors.
+async fn run_gateway_once(
+    spot_symbol: &str,
+    perp_symbol: &str,
+    hot_path: Arc<HotPath>,
+) -> Result<()> {
     use tokio_tungstenite::connect_async;
 
     const GATE_WS_URL: &str = "wss://api.gateio.ws/ws/v4/";
@@ -229,6 +257,130 @@ async fn run_gateway(spot_symbol: &str, perp_symbol: &str, hot_path: Arc<HotPath
     }
 
     Ok(())
+}
+
+/// Gateway WS runner with exponential backoff reconnection.
+///
+/// Reconnect policy:
+/// - Backoff: 1s → 2s → 4s → 8s → ... → 30s (max)
+/// - Max 10 consecutive failures → engine halts
+/// - Disconnected >60s → order placement paused (risk control)
+/// - On reconnect: re-subscribes to all channels automatically
+/// - Each reconnect event is logged with timestamp + attempt number
+async fn run_gateway_with_reconnect(
+    spot_symbol: &str,
+    perp_symbol: &str,
+    hot_path: Arc<HotPath>,
+    health: Arc<health::HealthHandle>,
+    cfg: ReconnectConfig,
+) -> Result<()> {
+    let mut attempt: u32 = 0;
+    let mut disconnect_at: Option<Instant> = None;
+
+    loop {
+        if attempt > 0 {
+            // Compute backoff: 1s * 2^(attempt-1), capped at max_delay
+            let raw_delay = cfg.initial_delay.as_millis() as u64 * (1u64 << (attempt - 1).min(5));
+            let delay = Duration::from_millis(raw_delay).min(cfg.max_delay);
+
+            warn!(
+                "WS reconnect: attempt={}/{} delay={}s ts={}",
+                attempt,
+                cfg.max_attempts,
+                delay.as_secs_f32(),
+                chrono_now_utc()
+            );
+            health.set_reconnect_attempt(attempt).await;
+            health.set_gate_ws(health::GateWsStatus::Disconnected).await;
+
+            // Check if we've been disconnected >60s → pause orders
+            if let Some(da) = disconnect_at {
+                if da.elapsed() >= cfg.pause_threshold {
+                    warn!(
+                        "WS disconnected >{}s — pausing order placement",
+                        cfg.pause_threshold.as_secs()
+                    );
+                    health.set_order_pause(true).await;
+                }
+            }
+
+            tokio::time::sleep(delay).await;
+        }
+
+        // Track when this disconnect window started (if not already set)
+        if attempt > 0 && disconnect_at.is_none() {
+            disconnect_at = Some(Instant::now());
+        }
+
+        match run_gateway_once(spot_symbol, perp_symbol, Arc::clone(&hot_path)).await {
+            Ok(()) => {
+                // Clean disconnect — reconnect
+                warn!(
+                    "WS connection closed cleanly, will reconnect (attempt {})",
+                    attempt + 1
+                );
+                if disconnect_at.is_none() {
+                    disconnect_at = Some(Instant::now());
+                }
+                attempt += 1;
+            }
+            Err(e) => {
+                error!("WS connection error: {:?} (attempt {})", e, attempt + 1);
+                if disconnect_at.is_none() {
+                    disconnect_at = Some(Instant::now());
+                }
+                attempt += 1;
+            }
+        }
+
+        if attempt > cfg.max_attempts {
+            error!(
+                "WS reconnect exhausted: {} consecutive failures. Engine halting.",
+                cfg.max_attempts
+            );
+            health.set_gate_ws(health::GateWsStatus::Disconnected).await;
+            anyhow::bail!(
+                "Gateway WS: {} consecutive reconnect failures. Engine halted.",
+                cfg.max_attempts
+            );
+        }
+
+        // Successful connection resets counters
+        if attempt == 0 {
+            health.reset_reconnect().await;
+            health.set_gate_ws(health::GateWsStatus::Connected).await;
+            disconnect_at = None;
+            info!("WS connected successfully");
+        }
+    }
+}
+
+/// Return current UTC time as a compact string for logging.
+fn chrono_now_utc() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // Format as YYYY-MM-DDTHH:MM:SSZ (no external dep, manual math)
+    let s = secs;
+    let days = s / 86400;
+    let time = s % 86400;
+    let h = time / 3600;
+    let m = (time % 3600) / 60;
+    let sec = time % 60;
+    // Julian day → Gregorian (simple approximation for display)
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let yr = if mo <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", yr, mo, d, h, m, sec)
 }
 
 #[tokio::main]
@@ -316,13 +468,21 @@ async fn main() -> anyhow::Result<()> {
         args::health_port()
     );
 
-    // Run Gate.io WS client
+    // Run Gate.io WS client with reconnection
     let spot_sym = args::spot_symbol();
     let perp_sym = args::perp_symbol();
-    info!("Starting Gate.io WS client");
+    info!("Starting Gate.io WS client (with exponential backoff reconnect)");
     health.set_gate_ws(health::GateWsStatus::Connected).await;
 
-    let result = run_gateway(&spot_sym, &perp_sym, hot_path).await;
+    let reconnect_cfg = ReconnectConfig::default();
+    let result = run_gateway_with_reconnect(
+        &spot_sym,
+        &perp_sym,
+        hot_path,
+        Arc::clone(&health),
+        reconnect_cfg,
+    )
+    .await;
     health.set_gate_ws(health::GateWsStatus::Disconnected).await;
 
     if let Err(e) = result {

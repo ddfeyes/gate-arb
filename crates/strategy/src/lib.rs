@@ -9,7 +9,7 @@ use tracing::{info, warn};
 
 use db::{Db, SpreadRecord, TradeRecord};
 use engine::Engine;
-use types::{ArbitragePosition, Leg, LegKind, SpreadSignal, TradeState, Fixed64, SCALE};
+use types::{ArbitragePosition, Fixed64, Leg, LegKind, SpreadSignal, TradeState, SCALE};
 
 const LEG2_TIMEOUT_US: u64 = 500_000; // 500ms
 #[allow(dead_code)]
@@ -86,8 +86,7 @@ impl Strategy {
                         *self.paper_pos.write() = Some(pos);
                         info!(
                             "PAPER ENTRY: spot={} perp={} size={}",
-                            sig.bid_price, sig.ask_price,
-                            self.paper_exec.size_qty
+                            sig.bid_price, sig.ask_price, self.paper_exec.size_qty
                         );
                     }
                 }
@@ -193,7 +192,7 @@ impl Strategy {
 /// Paper trade executor — simulates entry/exit and records P&L to DB.
 /// All prices in 1e8 fixed-point units.
 pub struct PaperExecutor {
-    pub size_qty: u64, // 1e8 units (e.g. 1_000_000 = 0.01 BTC)
+    pub size_qty: u64,        // 1e8 units (e.g. 1_000_000 = 0.01 BTC)
     pub exit_spread_bps: i64, // close when spread ≤ this many bps
 }
 
@@ -207,14 +206,18 @@ impl PaperExecutor {
 
     /// Called on a new spread signal — open paper position.
     #[inline(always)]
-    pub fn on_entry_signal(&self, sig: &SpreadSignal, db: &Option<Arc<Db>>) -> Option<PaperPosition> {
+    pub fn on_entry_signal(
+        &self,
+        sig: &SpreadSignal,
+        db: &Option<Arc<Db>>,
+    ) -> Option<PaperPosition> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_micros() as i64;
 
-        let spot_entry = sig.bid_price.raw() as i64;   // bought spot at bid
-        let perp_entry = sig.ask_price.raw() as i64;   // shorted perp at ask
+        let spot_entry = sig.bid_price.raw() as i64; // bought spot at bid
+        let perp_entry = sig.ask_price.raw() as i64; // shorted perp at ask
         let size = self.size_qty as i64;
         let size_usd = (sig.bid_price.as_float() * (size as f64 / 1e8)) as i64;
 

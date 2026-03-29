@@ -96,7 +96,8 @@ impl HotPath {
                         .as_millis() as u64;
                     let spot_price = self.engine.spot_book.read().best_bid().map(|p| p.raw());
                     let perp_price = self.engine.perp_book.read().best_ask().map(|p| p.raw());
-                    self.funding_strategy.on_warm_tick(now_ms, spot_price, perp_price);
+                    self.funding_strategy
+                        .on_warm_tick(now_ms, spot_price, perp_price);
                 }
                 WsEvent::SpotTrades(_) => {}
             }
@@ -111,7 +112,8 @@ impl HotPath {
                 .as_millis() as u64;
             let spot_price = self.engine.spot_book.read().best_bid().map(|p| p.raw());
             let perp_price = self.engine.perp_book.read().best_ask().map(|p| p.raw());
-            self.funding_strategy.on_warm_tick(now_ms, spot_price, perp_price);
+            self.funding_strategy
+                .on_warm_tick(now_ms, spot_price, perp_price);
         }
         // Frontend PnL broadcast
         let stats = self.strategy.get_paper_stats();
@@ -123,7 +125,9 @@ impl HotPath {
             stats.total_trades + funding_stats.total_cycles,
             stats.wins + funding_stats.profitable_cycles,
             stats.losses
-                + funding_stats.total_cycles.saturating_sub(funding_stats.profitable_cycles),
+                + funding_stats
+                    .total_cycles
+                    .saturating_sub(funding_stats.profitable_cycles),
             self.strategy.is_position_open() || self.funding_strategy.is_position_open(),
         );
     }
@@ -273,9 +277,7 @@ async fn main() -> anyhow::Result<()> {
     let funding_strategy = Arc::new(FundingStrategy::new(paper_mode));
     info!(
         "Funding arb strategy: paper_mode={} threshold={:.1}bps entry_window={}s",
-        paper_mode,
-        funding_strategy.entry_threshold_bps,
-        300
+        paper_mode, funding_strategy.entry_threshold_bps, 300
     );
 
     let frontend = Arc::new(frontend_ws::FrontendWs::new());

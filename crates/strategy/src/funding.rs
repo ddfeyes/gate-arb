@@ -124,8 +124,8 @@ impl FundingStrategy {
         // Gate.io snapshots at 00:00, 08:00, 16:00 UTC.
         let now_secs = now_ms / 1_000;
         let secs_in_day = now_secs % (24 * 3600);
-        let next_boundary_in_day = ((secs_in_day / FUNDING_INTERVAL_SECS) + 1)
-            * FUNDING_INTERVAL_SECS;
+        let next_boundary_in_day =
+            ((secs_in_day / FUNDING_INTERVAL_SECS) + 1) * FUNDING_INTERVAL_SECS;
         let secs_until = if next_boundary_in_day < 24 * 3600 {
             next_boundary_in_day - secs_in_day
         } else {
@@ -235,13 +235,7 @@ impl FundingStrategy {
         }
     }
 
-    fn paper_close(
-        &self,
-        pos: &FundingPosition,
-        now_ms: u64,
-        spot_exit: u64,
-        perp_exit: u64,
-    ) {
+    fn paper_close(&self, pos: &FundingPosition, now_ms: u64, spot_exit: u64, perp_exit: u64) {
         // P&L from price movement
         // Spot: bought at entry, sell at exit → spot_exit - spot_entry
         // Perp: shorted at entry, buy back at exit → perp_entry - perp_exit
@@ -257,8 +251,8 @@ impl FundingStrategy {
         // Maker fee 2 × 0.02% per leg (open + close = 4 legs total)
         const MAKER_FEE_BPS: u64 = 2;
         let notional = (pos.spot_entry_price as i128 + pos.perp_entry_price as i128) * qty as i128;
-        let fee_raw = ((notional * (MAKER_FEE_BPS * 4) as i128 / 10_000i128)
-            / SCALE as i128) as i64;
+        let fee_raw =
+            ((notional * (MAKER_FEE_BPS * 4) as i128 / 10_000i128) / SCALE as i128) as i64;
 
         let total_pnl = spot_pnl + perp_pnl + funding_raw - fee_raw;
         let hold_secs = now_ms.saturating_sub(pos.entered_at_ms) / 1_000;
@@ -331,7 +325,11 @@ mod tests {
         // 00:00 UTC → next snapshot is 08:00 = 8*3600*1000 ms
         let now = 0u64; // midnight UTC
         let next = FundingStrategy::next_snapshot_ms(now);
-        assert_eq!(next, 8 * 3600 * 1_000, "first snapshot after midnight = 08:00");
+        assert_eq!(
+            next,
+            8 * 3600 * 1_000,
+            "first snapshot after midnight = 08:00"
+        );
     }
 
     #[test]
@@ -344,7 +342,10 @@ mod tests {
         let snapshot = FundingStrategy::next_snapshot_ms(0);
         let now = snapshot - 4 * 60 * 1_000;
         strat.on_warm_tick(now, Some(5_000_000_000_000), Some(5_000_100_000_000));
-        assert!(!strat.is_position_open(), "should not enter below threshold");
+        assert!(
+            !strat.is_position_open(),
+            "should not enter below threshold"
+        );
     }
 
     #[test]
@@ -360,7 +361,10 @@ mod tests {
         let spot = 5_000_000_000_000u64; // $50k
         let perp = 5_001_000_000_000u64; // $50k + $10 premium
         strat.on_warm_tick(entry_ms, Some(spot), Some(perp));
-        assert!(strat.is_position_open(), "should enter with 2bps rate in window");
+        assert!(
+            strat.is_position_open(),
+            "should enter with 2bps rate in window"
+        );
     }
 
     #[test]
@@ -387,7 +391,10 @@ mod tests {
         // Enter 3 minutes before snapshot
         let entry_ms = snapshot - 3 * 60 * 1_000;
         strat.on_warm_tick(entry_ms, Some(5_000_000_000_000), Some(5_001_000_000_000));
-        assert!(strat.is_position_open(), "position should be open after entry");
+        assert!(
+            strat.is_position_open(),
+            "position should be open after entry"
+        );
         assert_eq!(strat.position_state(), Some(FundingState::Entered));
 
         // Advance past snapshot
@@ -398,7 +405,10 @@ mod tests {
         // Advance past max hold (2 minutes after snapshot)
         let exit_ms = snapshot + MAX_HOLD_AFTER_SNAPSHOT_SECS * 1_000 + 1_000;
         strat.on_warm_tick(exit_ms, Some(5_000_000_000_000), Some(5_001_000_000_000));
-        assert!(!strat.is_position_open(), "position should be closed after exit");
+        assert!(
+            !strat.is_position_open(),
+            "position should be closed after exit"
+        );
 
         let stats = strat.get_stats();
         assert_eq!(stats.total_cycles, 1, "should have completed 1 cycle");

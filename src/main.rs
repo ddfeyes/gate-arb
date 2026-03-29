@@ -9,8 +9,14 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 mod args {
-    pub const SPOT_SYMBOL: &str = "BTC_USDT";
-    pub const PERP_SYMBOL: &str = "BTC_USDT";
+    use std::env;
+
+    pub fn spot_symbol() -> String {
+        env::var("SPOT_SYMBOL").unwrap_or_else(|_| "BTC_USDT".into())
+    }
+    pub fn perp_symbol() -> String {
+        env::var("PERP_SYMBOL").unwrap_or_else(|_| "BTC_USDT".into())
+    }
     pub const FRONTEND_PORT: u16 = 8080;
     pub const GATE_WS_URL: &str = "wss://api.gateio.ws/ws/v4/";
     pub const HEALTH_PORT: u16 = 8081;
@@ -92,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Connecting to {}", ws_url);
     health.set_gate_ws(health::GateWsStatus::Connected).await;
 
-    let result = gw.run(args::SPOT_SYMBOL, args::PERP_SYMBOL).await;
+    let result = gw.run(&args::spot_symbol(), &args::perp_symbol()).await;
     health.set_gate_ws(health::GateWsStatus::Disconnected).await;
 
     if let Err(e) = result {

@@ -32,22 +32,23 @@ impl Default for RiskConfig {
 
 impl RiskConfig {
     pub fn from_env() -> Self {
+        let defaults = RiskConfig::default();
         Self {
             max_drawdown_raw: std::env::var("GATE_MAX_DRAWDOWN_USD")
                 .ok()
                 .and_then(|v| v.parse::<f64>().ok())
                 .map(|v| (v * 1e8_f64) as i64)
-                .unwrap_or_default(),
+                .unwrap_or(defaults.max_drawdown_raw), // $10 default, NOT i64::default() = 0
 
             max_positions: std::env::var("GATE_MAX_POSITIONS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(3),
+                .unwrap_or(defaults.max_positions),
 
             ping_threshold_ms: std::env::var("GATE_PING_THRESHOLD_MS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(100),
+                .unwrap_or(defaults.ping_threshold_ms),
         }
     }
 }
@@ -85,16 +86,24 @@ impl RiskViolations {
 }
 
 /// Central risk manager — shared across engine, strategy, and gateway.
-/// Thread-safe: uses atomics +RwLock for counters.
+///
+/// # Memory ordering
+/// - `kill_switch`: Release on write, Acquire on read — ensures activation is
+///   visible across threads on non-TSO architectures (ARM/Graviton).
+/// - `position_count`, `last_ping_ms`, `paper_mode`: Relaxed — these are
+///   sampled values where stale reads are acceptable for one tick.
+///
+/// # P&L snapshot atomicity
+/// `peak_pnl` and `cumulative_pnl` are merged into a single `RwLock<(i64, i64)>`
+/// so `current_drawdown_raw()` reads both values under one lock, avoiding TOCTOU.
 pub struct RiskManager {
     /// Kill switch — if set, no new positions can be opened.
+    /// Release/Acquire ordering: must be visible cross-thread immediately.
     kill_switch: AtomicBool,
     /// Current number of open positions.
     position_count: AtomicU64,
-    /// Peak cumulative P&L (high-water mark in raw units).
-    peak_pnl: RwLock<i64>,
-    /// Current cumulative P&L from strategy.
-    cumulative_pnl: RwLock<i64>,
+    /// (peak_pnl, cumulative_pnl) — single lock for atomic snapshot.
+    pnl: RwLock<(i64, i64)>,
     /// Most recent WS ping latency in ms.
     last_ping_ms: AtomicU64,
     /// Config snapshot.
@@ -120,8 +129,7 @@ impl RiskManager {
         Self {
             kill_switch: AtomicBool::new(false),
             position_count: AtomicU64::new(0),
-            peak_pnl: RwLock::new(0),
-            cumulative_pnl: RwLock::new(0),
+            pnl: RwLock::new((0, 0)), // (peak, cumulative)
             last_ping_ms: AtomicU64::new(0),
             config,
             paper_mode: AtomicBool::new(true),
@@ -137,21 +145,19 @@ impl RiskManager {
     /// Update the current cumulative P&L and peak tracker.
     /// Called after each trade closes.
     pub fn update_pnl(&self, realized_pnl: i64) {
-        let mut current = self.cumulative_pnl.write();
+        let mut guard = self.pnl.write();
+        let (peak, current) = &mut *guard;
         *current += realized_pnl;
-        let pnl = *current;
-
-        let mut peak = self.peak_pnl.write();
-        if pnl > *peak {
-            *peak = pnl;
+        if *current > *peak {
+            *peak = *current;
         }
     }
 
     /// Full P&L sync — called periodically or on state recovery to reconcile peak tracking.
     pub fn sync_cumulative_pnl(&self, pnl: i64) {
-        let mut current = self.cumulative_pnl.write();
+        let mut guard = self.pnl.write();
+        let (peak, current) = &mut *guard;
         *current = pnl;
-        let mut peak = self.peak_pnl.write();
         if pnl > *peak {
             *peak = pnl;
         }
@@ -164,10 +170,22 @@ impl RiskManager {
     }
 
     /// Record that a position was closed.
+    ///
+    /// Guards against wrapping to u64::MAX when count is already 0
+    /// (defensive — should not happen if open/close calls are balanced).
     pub fn position_closed(&self) {
-        let prev = self.position_count.fetch_sub(1, Ordering::Relaxed);
-        if prev > 0 {
-            info!("risk: position closed (count={})", prev - 1);
+        let prev = self
+            .position_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                if v > 0 {
+                    Some(v - 1)
+                } else {
+                    None
+                }
+            });
+        match prev {
+            Ok(old) => info!("risk: position closed (count={})", old - 1),
+            Err(_) => warn!("risk: position_closed() called with count=0 (bug: unbalanced calls)"),
         }
     }
 
@@ -178,34 +196,39 @@ impl RiskManager {
 
     /// Activate the kill switch — stops all new position entries immediately.
     /// Returns the previous state.
+    ///
+    /// Uses Release ordering so the write is visible to all reader threads
+    /// even on non-TSO architectures (ARM, Graviton).
     pub fn activate_kill_switch(&self) -> bool {
-        let prev = self.kill_switch.swap(true, Ordering::Relaxed);
+        let prev = self.kill_switch.swap(true, Ordering::Release);
         warn!("risk: KILL SWITCH ACTIVATED (was={})", prev);
         prev
     }
 
     /// Deactivate the kill switch (manual reset required).
     pub fn deactivate_kill_switch(&self) {
-        self.kill_switch.store(false, Ordering::Relaxed);
+        self.kill_switch.store(false, Ordering::Release);
         info!("risk: kill switch deactivated");
     }
 
     /// Returns true if the kill switch is currently active.
     pub fn is_kill_switch_active(&self) -> bool {
-        self.kill_switch.load(Ordering::Relaxed)
+        self.kill_switch.load(Ordering::Acquire)
     }
 
     /// Returns the current drawdown in raw units (positive = loss from peak).
+    ///
+    /// Reads both peak and cumulative under a single RwLock — atomic snapshot,
+    /// no TOCTOU between the two values.
     pub fn current_drawdown_raw(&self) -> i64 {
-        let peak = *self.peak_pnl.read();
-        let current = *self.cumulative_pnl.read();
+        let (peak, current) = *self.pnl.read();
         (peak - current).max(0)
     }
 
     /// Check all risk conditions and return violations.
     /// In paper mode, drawdown and position violations are logged but do not block.
     pub fn check(&self) -> RiskViolations {
-        let kill_switch_active = self.kill_switch.load(Ordering::Relaxed);
+        let kill_switch_active = self.kill_switch.load(Ordering::Acquire);
         let high_latency =
             self.last_ping_ms.load(Ordering::Relaxed) > self.config.ping_threshold_ms;
         let positions = self.position_count.load(Ordering::Relaxed) as usize;
@@ -256,15 +279,16 @@ impl RiskManager {
 
     /// Human-readable risk status for health endpoint / logs.
     pub fn status(&self) -> RiskStatus {
+        let (peak_pnl, cumulative_pnl) = *self.pnl.read();
         RiskStatus {
-            kill_switch: self.kill_switch.load(Ordering::Relaxed),
+            kill_switch: self.kill_switch.load(Ordering::Acquire),
             position_count: self.position_count.load(Ordering::Relaxed) as usize,
             max_positions: self.config.max_positions,
-            drawdown_raw: self.current_drawdown_raw(),
+            drawdown_raw: (peak_pnl - cumulative_pnl).max(0),
             max_drawdown_raw: self.config.max_drawdown_raw,
             last_ping_ms: self.last_ping_ms.load(Ordering::Relaxed),
             ping_threshold_ms: self.config.ping_threshold_ms,
-            cumulative_pnl: *self.cumulative_pnl.read(),
+            cumulative_pnl,
         }
     }
 }

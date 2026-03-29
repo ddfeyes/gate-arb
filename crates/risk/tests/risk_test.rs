@@ -1,4 +1,5 @@
 use risk::{RiskConfig, RiskManager};
+use std::env;
 
 fn make_risk(max_drawdown_usd: f64, max_positions: usize, ping_ms: u64) -> RiskManager {
     RiskManager::new(RiskConfig {
@@ -101,6 +102,72 @@ fn risk_status_serializes() {
     assert!(json.contains("kill_switch"));
     assert!(json.contains("position_count"));
     assert!(json.contains("drawdown_raw"));
+}
+
+// ── from_env() regression tests ─────────────────────────────────────────────
+
+#[test]
+fn from_env_default_max_drawdown_is_ten_dollars() {
+    // CRITICAL regression: .unwrap_or_default() = 0, not $10.
+    // Must use .unwrap_or(defaults.max_drawdown_raw).
+    env::remove_var("GATE_MAX_DRAWDOWN_USD");
+    env::remove_var("GATE_MAX_POSITIONS");
+    env::remove_var("GATE_PING_THRESHOLD_MS");
+    let cfg = RiskConfig::from_env();
+    assert_eq!(
+        cfg.max_drawdown_raw,
+        10_000_000_000, // $10 in 1e8 units
+        "from_env() without GATE_MAX_DRAWDOWN_USD must default to $10, not $0"
+    );
+    assert_eq!(cfg.max_positions, 3);
+    assert_eq!(cfg.ping_threshold_ms, 100);
+}
+
+#[test]
+fn from_env_respects_explicit_value() {
+    env::set_var("GATE_MAX_DRAWDOWN_USD", "25.5");
+    env::set_var("GATE_MAX_POSITIONS", "7");
+    env::set_var("GATE_PING_THRESHOLD_MS", "50");
+    let cfg = RiskConfig::from_env();
+    // Clean up before assert so test isolation is preserved on failure
+    env::remove_var("GATE_MAX_DRAWDOWN_USD");
+    env::remove_var("GATE_MAX_POSITIONS");
+    env::remove_var("GATE_PING_THRESHOLD_MS");
+    assert_eq!(cfg.max_drawdown_raw, (25.5 * 1e8) as i64);
+    assert_eq!(cfg.max_positions, 7);
+    assert_eq!(cfg.ping_threshold_ms, 50);
+}
+
+// ── position_count wiring ────────────────────────────────────────────────────
+
+#[test]
+fn position_closed_saturates_at_zero() {
+    let rm = make_risk(100.0, 5, 200);
+    // Should not wrap to u64::MAX
+    rm.position_closed(); // count was 0 — saturate guard
+    let status = rm.status();
+    assert_eq!(
+        status.position_count, 0,
+        "position_closed() on 0 must not wrap"
+    );
+}
+
+#[test]
+fn position_count_accurate_through_open_close_cycle() {
+    let rm = make_risk(100.0, 3, 200);
+    rm.set_paper_mode(false);
+    rm.position_opened();
+    rm.position_opened();
+    assert_eq!(rm.status().position_count, 2);
+    rm.position_closed();
+    assert_eq!(rm.status().position_count, 1);
+    rm.position_closed();
+    assert_eq!(rm.status().position_count, 0);
+    // Check max_positions blocking at limit
+    rm.position_opened();
+    rm.position_opened();
+    rm.position_opened();
+    assert!(!rm.can_open_position(), "at max_positions=3 should block");
 }
 
 #[test]

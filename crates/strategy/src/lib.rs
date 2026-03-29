@@ -168,6 +168,10 @@ impl Strategy {
         pos.state = TradeState::BothFilled;
         *self.position.write() = Some(pos);
 
+        if let Some(ref risk) = self.risk {
+            risk.position_opened();
+        }
+
         info!(
             "PAPER OPEN: spot_buy@{} perp_short@{} spread_raw={} spread_pct={}",
             sig.bid_price, sig.ask_price, sig.spread_raw, sig.spread_pct
@@ -292,6 +296,10 @@ impl Strategy {
 
         pos.state = TradeState::Closed;
         *pos_guard = None;
+
+        if let Some(ref risk) = self.risk {
+            risk.position_closed();
+        }
     }
 
     fn open_position(&self, sig: SpreadSignal) {
@@ -318,6 +326,10 @@ impl Strategy {
         };
 
         *self.position.write() = Some(ArbitragePosition::new(leg1, leg2, now));
+
+        if let Some(ref risk) = self.risk {
+            risk.position_opened();
+        }
     }
 
     fn check_timeouts(&self) {

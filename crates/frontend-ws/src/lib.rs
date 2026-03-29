@@ -23,6 +23,9 @@ pub struct DashboardState {
     pub bid_price: f64,
     pub ask_price: f64,
     pub pnl_raw: i64,
+    pub cumulative_pnl_usd: f64,
+    pub total_trades: i64,
+    pub win_rate: f64,
     pub position_open: bool,
     pub recent_logs: Vec<String>,
 }
@@ -41,6 +44,9 @@ impl FrontendWs {
                 bid_price: 0.0,
                 ask_price: 0.0,
                 pnl_raw: 0,
+                cumulative_pnl_usd: 0.0,
+                total_trades: 0,
+                win_rate: 0.0,
                 position_open: false,
                 recent_logs: Vec::new(),
             })),
@@ -123,6 +129,18 @@ impl FrontendWs {
         }
     }
 
+    /// Refresh cumulative P&L + stats from DB before broadcast.
+    fn refresh_stats(&self) {
+        if let Some(ref db) = self.db {
+            let stats = db.get_stats();
+            let mut s = self.state.write();
+            s.pnl_raw = stats.total_pnl_usd;
+            s.cumulative_pnl_usd = stats.total_pnl_usd as f64 / 100_000_000.0;
+            s.total_trades = stats.total_trades;
+            s.win_rate = stats.win_rate;
+        }
+    }
+
     async fn handle_client(
         &self,
         state: Arc<RwLock<DashboardState>>,
@@ -143,6 +161,8 @@ impl FrontendWs {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
+                    // Refresh P&L stats from DB before each broadcast
+                    self.refresh_stats();
                     let snapshot = {
                         let s = state.read();
                         serde_json::to_string(&*s)?

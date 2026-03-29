@@ -188,7 +188,6 @@ impl HealthHandle {
         let port = self.port;
 
         tokio::spawn(async move {
-            let state = state;
             let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await {
                 Ok(l) => l,
                 Err(e) => {

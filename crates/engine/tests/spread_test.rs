@@ -5,13 +5,25 @@ fn make_engine(spot_bid: f64, spot_ask: f64, perp_bid: f64, perp_ask: f64) -> En
     let e = Engine::<20, 20>::new();
     {
         let mut sb = e.spot_book.write();
-        sb.update_bids(&[Level { price: Fixed64::from_float(spot_bid), qty: 1_000_000 }]);
-        sb.update_asks(&[Level { price: Fixed64::from_float(spot_ask), qty: 1_000_000 }]);
+        sb.update_bids(&[Level {
+            price: Fixed64::from_float(spot_bid),
+            qty: 1_000_000,
+        }]);
+        sb.update_asks(&[Level {
+            price: Fixed64::from_float(spot_ask),
+            qty: 1_000_000,
+        }]);
     }
     {
         let mut pb = e.perp_book.write();
-        pb.update_bids(&[Level { price: Fixed64::from_float(perp_bid), qty: 1_000_000 }]);
-        pb.update_asks(&[Level { price: Fixed64::from_float(perp_ask), qty: 1_000_000 }]);
+        pb.update_bids(&[Level {
+            price: Fixed64::from_float(perp_bid),
+            qty: 1_000_000,
+        }]);
+        pb.update_asks(&[Level {
+            price: Fixed64::from_float(perp_ask),
+            qty: 1_000_000,
+        }]);
     }
     e
 }

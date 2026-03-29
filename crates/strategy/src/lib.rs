@@ -179,7 +179,10 @@ impl Strategy {
         // Get current spread from engine (not threshold-gated)
         let snap = self.engine.current_spread();
         let inverted = snap.as_ref().map(|s| s.inverted).unwrap_or(false);
-        let spread_at_exit = snap.as_ref().map(|s| s.spread_raw <= self.exit_spread_raw).unwrap_or(false);
+        let spread_at_exit = snap
+            .as_ref()
+            .map(|s| s.spread_raw <= self.exit_spread_raw)
+            .unwrap_or(false);
         let spread_converged = inverted || spread_at_exit;
 
         if !spread_converged && !max_hold {

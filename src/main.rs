@@ -88,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Build gateway and inject OB sender
-    let gw = gateway_ws::GatewayWs::new();
+    let mut gw = gateway_ws::GatewayWs::new();
     gw.set_ob_tx(ob_tx);
 
     let ws_url = args::GATE_WS_URL;

@@ -292,7 +292,10 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         health_srv.run_server().await;
     });
-    info!("Health endpoint on http://0.0.0.0:{}/health", cfg.health_port);
+    info!(
+        "Health endpoint on http://0.0.0.0:{}/health",
+        cfg.health_port
+    );
 
     // Run Gate.io WS client
     info!("Starting Gate.io WS client");

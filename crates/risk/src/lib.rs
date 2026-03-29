@@ -36,7 +36,7 @@ impl RiskConfig {
             max_drawdown_raw: std::env::var("GATE_MAX_DRAWDOWN_USD")
                 .ok()
                 .and_then(|v| v.parse::<f64>().ok())
-                .map(|v| (v * 1e8 as f64) as i64)
+                .map(|v| (v * 1e8_f64) as i64)
                 .unwrap_or_default(),
 
             max_positions: std::env::var("GATE_MAX_POSITIONS")

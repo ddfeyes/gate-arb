@@ -263,8 +263,16 @@ impl GatewayWs {
         if let Some(ref tx) = *ob_tx {
             let update = ObUpdateChannel {
                 symbol: update.s.clone(),
-                bids: update.bids.into_iter().map(|(p, q)| ObLevel { price: p, qty: q }).collect(),
-                asks: update.asks.into_iter().map(|(p, q)| ObLevel { price: p, qty: q }).collect(),
+                bids: update
+                    .bids
+                    .into_iter()
+                    .map(|(p, q)| ObLevel { price: p, qty: q })
+                    .collect(),
+                asks: update
+                    .asks
+                    .into_iter()
+                    .map(|(p, q)| ObLevel { price: p, qty: q })
+                    .collect(),
                 t: update.t,
             };
             // Non-blocking send — drop if channel is full (hot path must not block).

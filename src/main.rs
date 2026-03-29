@@ -8,11 +8,34 @@ use std::sync::Arc;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-mod args {
-    pub const SPOT_SYMBOL: &str = "BTC_USDT";
-    pub const PERP_SYMBOL: &str = "BTC_USDT";
-    pub const FRONTEND_PORT: u16 = 8080;
-    pub const GATE_WS_URL: &str = "wss://api.gateio.ws/ws/v4/";
+/// Resolved runtime config — symbols come from env vars with sensible defaults.
+#[derive(Debug, Clone)]
+pub struct Args {
+    pub spot_symbol: String,
+    pub perp_symbol: String,
+    pub frontend_port: u16,
+    pub gate_ws_url: String,
+}
+
+impl Default for Args {
+    fn default() -> Self {
+        Self {
+            spot_symbol: std::env::var("SPOT_SYMBOL").unwrap_or_else(|_| "BTC_USDT".into()),
+            perp_symbol: std::env::var("PERP_SYMBOL").unwrap_or_else(|_| "BTC_USDT".into()),
+            frontend_port: std::env::var("FRONTEND_PORT")
+                .unwrap_or_else(|_| "8080".into())
+                .parse()
+                .unwrap_or(8080),
+            gate_ws_url: std::env::var("GATE_WS_URL")
+                .unwrap_or_else(|_| "wss://api.gateio.ws/ws/v4/".into()),
+        }
+    }
+}
+
+impl Args {
+    pub fn resolve() -> Self {
+        Self::default()
+    }
 }
 
 #[tokio::main]
@@ -29,30 +52,48 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("PAPER_MODE").unwrap_or_else(|_| "true".into())
     );
 
+    // --- DB init ---
+    let db_path = std::path::PathBuf::from("gate-arb.db");
+    let db = Arc::new(db::Db::open(&db_path)?);
+
+    // Background flush task — drains rings every 5s (cold path)
+    let db_flush = Arc::clone(&db);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            db_flush.flush();
+        }
+    });
+
+    // Resolve config from environment
+    let cfg = Args::resolve();
+    info!(
+        "Config — spot={} perp={} frontend_port={} gate_ws={}",
+        cfg.spot_symbol, cfg.perp_symbol, cfg.frontend_port, cfg.gate_ws_url
+    );
+
     // Build engine
     let engine = Arc::new(engine::Engine::<20, 20>::new());
-    // threshold_spread_raw is an ABSOLUTE spread in Fixed64 raw units (1e8 = 1 USDT).
-    // 50bps on BTC ~50k = $250 = 25_000_000_000 raw.
-    // In paper mode this is just a signal threshold — no real orders.
-    let _strategy = strategy::Strategy::new(Arc::clone(&engine), 25_000_000_000);
+    let threshold_spread_raw: u64 = 25_000_000_000; // 50bps on BTC @ 50k
+    let _strategy = strategy::Strategy::new(Arc::clone(&engine), threshold_spread_raw)
+        .with_db(Arc::clone(&db));
 
-    // Build frontend broadcaster
-    let frontend = Arc::new(frontend_ws::FrontendWs::new());
+    // Build frontend broadcaster + HTTP API
+    let frontend = Arc::new(frontend_ws::FrontendWs::new().with_db(Arc::clone(&db)));
 
-    // Start frontend WS server
+    // Start frontend WS + HTTP API servers
     let fe = Arc::clone(&frontend);
-    let fe_port = args::FRONTEND_PORT;
     tokio::spawn(async move {
-        if let Err(e) = fe.run(fe_port).await {
+        if let Err(e) = fe.run(cfg.frontend_port).await {
             tracing::error!("Frontend WS error: {:?}", e);
         }
     });
 
     // Connect to Gate.io and run hot path
     let gw = gateway_ws::GatewayWs::new();
-    let ws_url = args::GATE_WS_URL;
-    info!("Connecting to {}", ws_url);
-    gw.run(args::SPOT_SYMBOL, args::PERP_SYMBOL).await?;
+    info!("Connecting to {}", cfg.gate_ws_url);
+    gw.run(&cfg.spot_symbol, &cfg.perp_symbol).await?;
 
     Ok(())
 }

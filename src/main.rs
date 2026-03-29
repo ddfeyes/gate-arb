@@ -5,8 +5,8 @@
 //! Paper trading by default. Set PAPER_MODE=false to enable live trading.
 
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -96,7 +96,11 @@ async fn run_health_server(port: u16, frontend: Arc<frontend_ws::FrontendWs>, pa
     }
 }
 
-async fn handle_health(mut stream: TcpStream, frontend: Arc<frontend_ws::FrontendWs>, paper_mode: bool) {
+async fn handle_health(
+    mut stream: TcpStream,
+    frontend: Arc<frontend_ws::FrontendWs>,
+    paper_mode: bool,
+) {
     let mut buf = [0u8; 512];
     let n = match stream.read(&mut buf).await {
         Ok(n) if n > 0 => n,

@@ -9,15 +9,23 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 mod args {
-    pub const SPOT_SYMBOL: &str = "BTC_USDT";
-    pub const PERP_SYMBOL: &str = "BTC_USDT";
+    use std::env;
+
+    pub fn spot_symbol() -> String {
+        env::var("SPOT_SYMBOL").unwrap_or_else(|_| "BTC_USDT".into())
+    }
+
+    pub fn perp_symbol() -> String {
+        env::var("PERP_SYMBOL").unwrap_or_else(|_| "BTC_USDT".into())
+    }
+
     pub const FRONTEND_PORT: u16 = 8080;
     pub const GATE_WS_URL: &str = "wss://api.gateio.ws/ws/v4/";
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _subscriber = FmtSubscriber::builder()
+    FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .with_target(false)
         .compact()
@@ -52,7 +60,8 @@ async fn main() -> anyhow::Result<()> {
     let gw = gateway_ws::GatewayWs::new();
     let ws_url = args::GATE_WS_URL;
     info!("Connecting to {}", ws_url);
-    gw.run(args::SPOT_SYMBOL, args::PERP_SYMBOL).await?;
+    gw.run(args::spot_symbol().as_str(), args::perp_symbol().as_str())
+        .await?;
 
     Ok(())
 }

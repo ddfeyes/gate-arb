@@ -51,6 +51,7 @@ enum DbCmd {
     WriteSpread(SpreadRecord),
     GetTrades(i64, tokio::sync::oneshot::Sender<Vec<TradeRecord>>),
     GetPnlSummary(tokio::sync::oneshot::Sender<PnlSummary>),
+    #[allow(dead_code)]
     Shutdown,
 }
 

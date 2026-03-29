@@ -115,17 +115,19 @@ async fn handle_health(
         return;
     }
 
-    let state = frontend.state.read();
-    let response = format!(
-        r#"{{"status":"ok","paper_mode":{},"spread_bps":{},"bid_price":{},"ask_price":{},"position_open":{},"recent_logs":{}}}"#,
-        paper_mode,
-        state.spread_bps,
-        state.bid_price,
-        state.ask_price,
-        state.position_open,
-        state.recent_logs.len()
-    );
-    drop(state);
+    // Read state inside a tight scope — guard MUST be dropped before any await
+    let response = {
+        let state = frontend.state.read();
+        format!(
+            r#"{{"status":"ok","paper_mode":{},"spread_bps":{},"bid_price":{},"ask_price":{},"position_open":{},"recent_logs":{}}}"#,
+            paper_mode,
+            state.spread_bps,
+            state.bid_price,
+            state.ask_price,
+            state.position_open,
+            state.recent_logs.len()
+        )
+    }; // ← RwLockReadGuard dropped here, before any await
 
     let body_len = response.len();
     let reply = format!(

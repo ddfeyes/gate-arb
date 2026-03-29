@@ -3,6 +3,8 @@
 //! Usage: cargo run --release --bin gate-arb
 //!
 //! Paper trading by default. Set PAPER_MODE=false to enable live trading.
+//!
+//! All tuneable parameters are read from env vars at startup — see config.rs.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,28 +22,7 @@ use gateway_ws::{parse_price as gw_parse_price, WsEvent, CHANNEL_FUNDING_RATE};
 use strategy::{FundingStrategy, Strategy};
 use types::{Level as ObLevel, OrderBook};
 
-mod args {
-    use std::env;
-
-    pub fn spot_symbol() -> String {
-        env::var("SPOT_SYMBOL").unwrap_or_else(|_| "BTC_USDT".into())
-    }
-    pub fn perp_symbol() -> String {
-        env::var("PERP_SYMBOL").unwrap_or_else(|_| "BTC_USDT".into())
-    }
-    pub fn frontend_port() -> u16 {
-        env::var("FRONTEND_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(8080)
-    }
-    pub fn health_port() -> u16 {
-        env::var("HEALTH_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(8081)
-    }
-}
+mod config;
 
 /// Parse Gate.io order book level from string pair.
 #[inline(always)]
@@ -240,13 +221,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     info!("gate-arb starting...");
-    info!(
-        "Paper mode: {}",
-        std::env::var("PAPER_MODE").unwrap_or_else(|_| "true".into())
-    );
+
+    // --- Parse all env-driven config at startup ---
+    let cfg = config::Config::from_env();
+    cfg.log_effective();
 
     // --- Health server setup ---
-    let health = Arc::new(health::HealthHandle::new(args::health_port()));
+    let health = Arc::new(health::HealthHandle::new(cfg.health_port));
 
     // Startup self-check
     info!("Running startup self-check...");
@@ -267,17 +248,17 @@ async fn main() -> anyhow::Result<()> {
     let engine = Arc::new(engine::Engine::<20, 20>::new());
     health.set_engine(health::EngineStatus::Idle).await;
 
-    // threshold 25B raw ≈ 50bps on BTC at $50k
-    let strategy = Arc::new(strategy::Strategy::new(Arc::clone(&engine), 25_000_000_000));
+    // Spread arb strategy — threshold from config
+    let strategy = Arc::new(strategy::Strategy::new(
+        Arc::clone(&engine),
+        cfg.spread_threshold_raw,
+    ));
 
-    // Funding arb strategy (paper mode by default)
-    let paper_mode = std::env::var("PAPER_MODE")
-        .map(|v| v != "false")
-        .unwrap_or(true);
-    let funding_strategy = Arc::new(FundingStrategy::new(paper_mode));
+    // Funding arb strategy
+    let funding_strategy = Arc::new(FundingStrategy::new(cfg.paper_mode));
     info!(
         "Funding arb strategy: paper_mode={} threshold={:.1}bps entry_window={}s",
-        paper_mode, funding_strategy.entry_threshold_bps, 300
+        cfg.paper_mode, funding_strategy.entry_threshold_bps, 300
     );
 
     let frontend = Arc::new(frontend_ws::FrontendWs::new());
@@ -292,7 +273,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start frontend WS server
     let fe = Arc::clone(&frontend);
-    let fe_port = args::frontend_port();
+    let fe_port = cfg.frontend_port;
     let health_fe = Arc::clone(&health);
     tokio::spawn(async move {
         if let Err(e) = fe.run(fe_port).await {
@@ -313,16 +294,14 @@ async fn main() -> anyhow::Result<()> {
     });
     info!(
         "Health endpoint on http://0.0.0.0:{}/health",
-        args::health_port()
+        cfg.health_port
     );
 
     // Run Gate.io WS client
-    let spot_sym = args::spot_symbol();
-    let perp_sym = args::perp_symbol();
     info!("Starting Gate.io WS client");
     health.set_gate_ws(health::GateWsStatus::Connected).await;
 
-    let result = run_gateway(&spot_sym, &perp_sym, hot_path).await;
+    let result = run_gateway(&cfg.spot_symbol, &cfg.perp_symbol, hot_path).await;
     health.set_gate_ws(health::GateWsStatus::Disconnected).await;
 
     if let Err(e) = result {

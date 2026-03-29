@@ -209,7 +209,7 @@ impl PaperExecutor {
     pub fn on_entry_signal(
         &self,
         sig: &SpreadSignal,
-        db: &Option<Arc<Db>>,
+        _db: &Option<Arc<Db>>,
     ) -> Option<PaperPosition> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -16,8 +16,12 @@ pub use funding::FundingStrategy;
 use engine::Engine;
 use parking_lot::RwLock;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
-use types::{ArbitragePosition, Leg, LegKind, SpreadSignal, TradeState, SCALE};
+use types::{
+    ArbitragePosition, Leg, LegKind, OrderAck, OrderCmd, OrderStatus, Side, SpreadSignal,
+    TradeState, SCALE,
+};
 
 const LEG2_TIMEOUT_US: u64 = 500_000; // 500ms
 const MAX_HOLD_TIME_US: u64 = 4 * 3600 * 1_000_000; // 4 hours
@@ -51,6 +55,10 @@ pub struct Strategy {
     paper_stats: RwLock<PaperStats>,
     /// Tick counter for summary printing.
     tick_counter: RwLock<u64>,
+    /// Live order sender — None in paper mode. Set via set_order_sender().
+    order_sender: RwLock<Option<mpsc::Sender<OrderCmd>>>,
+    /// Monotonic client-ID counter. Leg1 IDs are even, Leg2 IDs are odd.
+    client_id_counter: RwLock<u64>,
 }
 
 impl Strategy {
@@ -68,6 +76,8 @@ impl Strategy {
             cumulative_pnl: RwLock::new(0),
             paper_stats: RwLock::new(PaperStats::default()),
             tick_counter: RwLock::new(0),
+            order_sender: RwLock::new(None),
+            client_id_counter: RwLock::new(0),
         }
     }
 
@@ -272,6 +282,15 @@ impl Strategy {
             .unwrap()
             .as_micros() as u64;
 
+        // Assign leg1 client_id (even) and leg2 client_id (odd = leg1 + 1).
+        let leg1_client_id = {
+            let mut counter = self.client_id_counter.write();
+            // Align to even: always increment by 2 so leg1 = N*2, leg2 = N*2+1
+            let id = (*counter) * 2;
+            *counter = counter.wrapping_add(1);
+            id
+        };
+
         let leg1 = Leg {
             kind: LegKind::SpotBuy,
             price: sig.bid_price,
@@ -290,6 +309,116 @@ impl Strategy {
         };
 
         *self.position.write() = Some(ArbitragePosition::new(leg1, leg2, now));
+
+        // Send LEG1 order to OrderManager (non-blocking try_send — hot path safe).
+        if let Some(sender) = self.order_sender.read().as_ref() {
+            let cmd = OrderCmd::Place {
+                client_id: leg1_client_id,
+                symbol: "BTC_USDT",
+                side: Side::Bid,
+                price: sig.bid_price,
+                qty: 1_000_000,
+                post_only: true,
+            };
+            if let Err(e) = sender.try_send(cmd) {
+                warn!("open_position: order channel full or closed: {:?}", e);
+            } else {
+                info!("LEG1 order sent: client_id={}", leg1_client_id);
+            }
+        }
+    }
+
+    /// Wire an order sender channel from the OrderManager.
+    ///
+    /// Must be called before switching to live mode (`paper_mode = false`).
+    pub fn set_order_sender(&self, sender: mpsc::Sender<OrderCmd>) {
+        *self.order_sender.write() = Some(sender);
+    }
+
+    /// Process an order acknowledgement from the OrderManager.
+    ///
+    /// State transitions:
+    /// - Leg1 Filled → send Leg2 order → state = Leg2Sent
+    /// - Leg2 Filled → state = BothFilled
+    /// - Any leg Cancelled/Rejected → state = Closing (emergency close)
+    pub fn on_order_ack(&self, ack: OrderAck) {
+        let mut pos_guard = self.position.write();
+        let pos = match pos_guard.as_mut() {
+            Some(p) => p,
+            None => {
+                warn!(
+                    "on_order_ack: no active position, ack ignored (client_id={})",
+                    ack.client_id
+                );
+                return;
+            }
+        };
+
+        match ack.status {
+            OrderStatus::Filled => {
+                if pos.state == TradeState::Leg1Sent && pos.legs[0].state == TradeState::Leg1Sent {
+                    // LEG1 filled — store exchange_id, send LEG2
+                    let leg2_client_id = ack.client_id + 1; // odd = leg2
+                    pos.legs[0].state = TradeState::Leg1Filled;
+                    pos.legs[0].filled_at_us = Some(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_micros() as u64,
+                    );
+                    pos.state = TradeState::Leg1Filled;
+
+                    let leg2_price = pos.legs[1].price;
+                    let leg2_qty = pos.legs[1].qty;
+
+                    info!(
+                        "LEG1 filled (exchange_id={}) → sending LEG2 client_id={}",
+                        ack.exchange_id, leg2_client_id
+                    );
+
+                    if let Some(sender) = self.order_sender.read().as_ref() {
+                        let cmd = OrderCmd::Place {
+                            client_id: leg2_client_id,
+                            symbol: "BTC_USDT",
+                            side: Side::Ask, // perp short = sell
+                            price: leg2_price,
+                            qty: leg2_qty,
+                            post_only: true,
+                        };
+                        if let Err(e) = sender.try_send(cmd) {
+                            warn!("on_order_ack: LEG2 send failed: {:?}", e);
+                        }
+                    }
+
+                    pos.legs[1].state = TradeState::Leg2Sent;
+                    pos.state = TradeState::Leg2Sent;
+                } else if pos.state == TradeState::Leg2Sent {
+                    // LEG2 filled → BOTH_FILLED
+                    pos.legs[1].state = TradeState::Leg1Filled; // reusing as "Filled"
+                    pos.legs[1].filled_at_us = Some(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_micros() as u64,
+                    );
+                    pos.state = TradeState::BothFilled;
+                    info!(
+                        "LEG2 filled (exchange_id={}) → BOTH_FILLED",
+                        ack.exchange_id
+                    );
+                }
+            }
+            OrderStatus::Cancelled | OrderStatus::Rejected => {
+                warn!(
+                    "Order cancelled/rejected (client_id={}, exchange_id={}) → Closing",
+                    ack.client_id, ack.exchange_id
+                );
+                pos.state = TradeState::Closing;
+            }
+            OrderStatus::Open | OrderStatus::PartiallyFilled => {
+                // Normal intermediate state — no action needed
+            }
+        }
     }
 
     fn check_timeouts(&self) {

@@ -8,3 +8,4 @@ types = { path = "../types" }
 engine = { path = "../engine" }
 parking_lot = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }

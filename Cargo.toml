@@ -19,6 +19,7 @@ tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 parking_lot = "0.12"
 engine = { path = "crates/engine" }
 frontend-ws = { path = "crates/frontend-ws" }
+order-manager = { path = "crates/order-manager" }
 strategy = { path = "crates/strategy" }
 gateway-ws = { path = "crates/gateway-ws" }
 health = { path = "crates/health" }

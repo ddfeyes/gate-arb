@@ -19,6 +19,7 @@ use tracing_subscriber::FmtSubscriber;
 use engine::Engine;
 use frontend_ws::FrontendWs;
 use gateway_ws::{parse_price as gw_parse_price, ReconnectConfig, WsEvent, CHANNEL_FUNDING_RATE};
+use order_manager::OrderManager;
 use strategy::{FundingStrategy, Strategy};
 use types::{Level as ObLevel, OrderBook};
 
@@ -354,10 +355,35 @@ async fn main() -> anyhow::Result<()> {
     health.set_engine(health::EngineStatus::Idle).await;
 
     // Spread arb strategy — threshold from config
-    let strategy = Arc::new(strategy::Strategy::new(
-        Arc::clone(&engine),
-        cfg.spread_threshold_raw,
-    ));
+    let strategy = {
+        let mut s = strategy::Strategy::new(Arc::clone(&engine), cfg.spread_threshold_raw);
+        s.paper_mode = cfg.paper_mode;
+        let s = Arc::new(s);
+
+        // Live mode: start OrderManager, wire order sender + ack pump.
+        if !cfg.paper_mode {
+            if cfg.api_key.is_empty() {
+                anyhow::bail!(
+                    "PAPER_MODE=false but GATE_API_KEY is not set. \
+                     Set credentials or re-enable paper mode."
+                );
+            }
+            info!("LIVE MODE: starting OrderManager (post-only maker orders)");
+            let om = OrderManager::new(cfg.api_key.clone(), cfg.api_secret.clone());
+            let (order_tx, mut ack_rx) = om.start();
+            s.set_order_sender(order_tx);
+
+            // Ack pump: warm thread forwards acks from OrderManager → strategy.
+            let s_ack = Arc::clone(&s);
+            tokio::spawn(async move {
+                while let Some(ack) = ack_rx.recv().await {
+                    s_ack.on_order_ack(ack);
+                }
+                tracing::warn!("OrderManager ack channel closed — live acks no longer processed");
+            });
+        }
+        s
+    };
 
     // Funding arb strategy
     let funding_strategy = Arc::new(FundingStrategy::new(cfg.paper_mode));

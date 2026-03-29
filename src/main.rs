@@ -76,8 +76,8 @@ async fn main() -> anyhow::Result<()> {
     // Build engine
     let engine = Arc::new(engine::Engine::<20, 20>::new());
     let threshold_spread_raw: u64 = 25_000_000_000; // 50bps on BTC @ 50k
-    let _strategy = strategy::Strategy::new(Arc::clone(&engine), threshold_spread_raw)
-        .with_db(Arc::clone(&db));
+    let _strategy =
+        strategy::Strategy::new(Arc::clone(&engine), threshold_spread_raw).with_db(Arc::clone(&db));
 
     // Build frontend broadcaster + HTTP API
     let frontend = Arc::new(frontend_ws::FrontendWs::new().with_db(Arc::clone(&db)));
